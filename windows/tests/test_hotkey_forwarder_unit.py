@@ -14,9 +14,12 @@ import hotkey_forwarder as h  # noqa: E402
 
 class ForwarderDispatchTest(unittest.TestCase):
     def setUp(self):
+        # 这些测试写的是输入法模式(text)的按键语义; Agent 模式(mic)另见
+        # ForwarderMicDispatchTest。不显式声明 trigger_mode 时, 代码默认回落 mic。
         args = argparse.Namespace(
             key="right-shift",
             mode="tap",
+            trigger_mode="text",
             no_audio=True,
             output_substr="CABLE Input",
         )
@@ -30,6 +33,7 @@ class ForwarderDispatchTest(unittest.TestCase):
         args = argparse.Namespace(
             key="right-shift",
             mode="hold",
+            trigger_mode="text",
             no_audio=True,
             output_substr="CABLE Input",
         )
@@ -147,6 +151,59 @@ class ForwarderDispatchTest(unittest.TestCase):
              mock.patch.object(h.time, "sleep"):
             self.forwarder.on_disconnect()
         self.assertEqual(sent, [])
+
+
+class ForwarderMicDispatchTest(unittest.TestCase):
+    """Agent 模式(mic)的派发测试: apps 配置里的语音键按 start/release 各注入一次。"""
+
+    APPS = [{"title_contains": "WorkBuddy", "exe_contains": "WorkBuddy",
+             "voice_key": "ctrl+d", "stop_on_release": True}]
+
+    def make_forwarder(self):
+        args = argparse.Namespace(
+            key="right-shift",   # 旧字段, mic 模式不使用, 但构造函数仍会读取
+            mode="tap",
+            trigger_mode="mic",
+            apps=self.APPS,
+            no_audio=True,
+            output_substr="CABLE Input",
+        )
+        return h.Forwarder(args)
+
+    @staticmethod
+    def event(name, **fields):
+        return (json.dumps({"event": name, **fields}) + "\n").encode("utf-8")
+
+    def test_voice_start_and_end_inject_app_voice_key_twice(self):
+        fwd = self.make_forwarder()
+        sent = []
+        with mock.patch.object(h, "_send_key", side_effect=lambda *a, **kw: sent.append((a, kw))), \
+             mock.patch.object(h.time, "sleep"), \
+             mock.patch.object(fwd.injector, "start"):
+            fwd.on_event(self.event("voice.start"))
+            fwd.on_event(self.event("voice.end"))
+        # tap 语义: start 一次注入 + release 再一次; ctrl+d 组合键 =
+        # [ctrl↓, d↓, d↑, ctrl↑] 4 条, 两次共 8 条
+        self.assertEqual(len(sent), 8)
+        ctrl, d = h.KEY_MAP["left-ctrl"], h.KEY_MAP["d"]
+        for base in (0, 4):
+            self.assertEqual(sent[base][0][:3], ctrl)
+            self.assertFalse(sent[base][1]["up"])
+            self.assertEqual(sent[base + 1][0][:3], d)
+            self.assertFalse(sent[base + 1][1]["up"])
+            self.assertEqual(sent[base + 2][0][:3], d)
+            self.assertTrue(sent[base + 2][1]["up"])
+            self.assertEqual(sent[base + 3][0][:3], ctrl)
+            self.assertTrue(sent[base + 3][1]["up"])
+
+    def test_down_enter_clicks_in_mic_mode(self):
+        fwd = self.make_forwarder()
+        order = []
+        with mock.patch.object(fwd.enter_injector, "click",
+                               side_effect=lambda: order.append("enter")), \
+             mock.patch.object(h.time, "monotonic", return_value=1.0):
+            fwd.on_event(self.event("key.action", action="enter"))
+        self.assertEqual(order, ["enter"])
 
 
 if __name__ == "__main__":

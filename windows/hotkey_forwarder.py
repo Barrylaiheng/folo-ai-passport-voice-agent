@@ -1126,7 +1126,20 @@ class Forwarder:
                     self.enter_injector.click()
                     print("[evt] 自动回车发送(auto_enter)")
         elif name == "device.hello":
-            print("[evt] 设备上线(device.hello)")
+            # 心跳降噪(2026-10-15 二机实测反馈): 设备每秒回一个 hello, 逐条打印
+            # 会把日志刷成千行噪音。只在线状态变化时记"上线", 其余每 30s 汇总一次。
+            now = time.monotonic()
+            gap = now - getattr(self, "_last_hello_at", -1e9)
+            self._last_hello_at = now
+            self._hello_count = getattr(self, "_hello_count", 0) + 1
+            if gap > 5.0:
+                self._hello_summary_base = self._hello_count
+                self._last_hello_summary_at = now
+                print("[evt] 设备上线(device.hello)")
+            elif now - getattr(self, "_last_hello_summary_at", 0) > 30.0:
+                self._last_hello_summary_at = now
+                print(f"[evt] 设备在线正常(心跳累计 "
+                      f"{self._hello_count - self._hello_summary_base} 次)")
             # 跨网配置推送: 配置了 remote_endpoint(穿透隧道地址)时, 趁设备在线
             # 把 隧道地址+配对令牌 下发存进设备 NVS —— 设备出门后据此直连,
             # 无需任何设备端配置 UI。在家(局域网)模式下此推送无副作用。
@@ -1573,7 +1586,11 @@ def main():
         print("   2. 系统麦克风: 设为 CABLE Output (VB-Audio) —— Agent 录到的就是你")
         print("      通过 AI Passport 说的话")
         print("   3. 光标停在已配置的 Agent 输入框(WorkBuddy/Trae...),")
-        print("      UP 键按下 → 注入该 Agent 语音快捷键开始录(WorkBuddy=Ctrl+D / Trae=Win+H, Agent 自转录)")
+        _app_sum = " / ".join(
+            f"{a.get('title_contains') or a.get('exe_contains')}="
+            f"{a.get('voice_key')}"
+            for a in (fwd.apps or []) if a.get("voice_key")) or "见配置"
+        print(f"      UP 键按下 → 注入该 Agent 语音快捷键开始录({_app_sum}, Agent 自转录)")
         print("   4. 松开 UP → 再注入一次该语音键停录(不发送); 核对文字后按设备 DOWN 键回车发送")
         print("   5. 无需校准坐标; 只要前台窗口是已配置 Agent 即可(应用标题含 WorkBuddy / Trae)")
     else:

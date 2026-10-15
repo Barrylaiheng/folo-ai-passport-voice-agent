@@ -1,0 +1,15 @@
+.venv/
+.deps/
+.ci-idf/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log
+*.exe
+*.bin
+*.elf
+*.map
+*.zip
+**/voice-config.json
+**/config.local.json
+.env*

@@ -1,0 +1,6 @@
+# Windows hardware microphone + hotkey bridge only. No cloud ASR dependencies.
+sounddevice==0.5.6
+# Agent 模式: UIA 输入框焦点恢复 / 窗口定位
+pywinauto==0.6.9
+# Agent 模式: Trae CDP 直连(可选加速通道)
+websockets==17.2

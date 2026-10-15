@@ -1,0 +1,9 @@
+Windows Registry Editor Version 5.00
+
+; 开启 Windows 10 在线语音识别（云端听写）
+; 作用: 让 Win+H 系统听写可用 —— TRAE 没有语音快捷键, 只能靠系统级听写触发语音
+; 等价于: 设置 -> 隐私 -> 语音 -> 开启"在线语音识别"
+; 双击导入后建议重启 TRAE 再测 Win+H
+
+[HKEY_CURRENT_USER\SOFTWARE\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy]
+"HasAccepted"=dword:00000001

@@ -1,0 +1,13 @@
+{
+  "trigger_mode": "mic",
+  "output_substr": "CABLE Input",
+  "udp_port": 33333,
+  "device_ip": "",
+  "stop_on_release": true,
+  "apps": [
+    {"title_contains": "WorkBuddy", "exe_contains": "WorkBuddy", "voice_key": "ctrl+d", "stop_on_release": true},
+    {"title_contains": "Trae", "exe_contains": "Trae CN", "voice_key": "alt+v", "stop_on_release": true, "cdp_port": 9222}
+  ],
+  "hotkey_key": "right-shift",
+  "hotkey_mode": "hold"
+}

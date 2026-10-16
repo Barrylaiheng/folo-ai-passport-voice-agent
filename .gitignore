@@ -14,3 +14,4 @@ __pycache__/
 **/config.local.json
 .env*
 build/
+*.zip.sha256

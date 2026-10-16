@@ -8,6 +8,7 @@
 - **静默启动**：`start-agent-tray.cmd` 经 pythonw 无窗口启动；新增 `windows/create-desktop-shortcut.cmd` 一键生成桌面图标（直指 pythonw，双击零窗口闪现），"日常 = 双击桌面图标"开箱即成。pythonw 下 stdout/stderr 为 None 的问题已在 main() 入口兜底重定向。
 - **VBAN 推流改为转发器自动管理**：`voice-config.json` 新增 `"vban": {"target": "B机IP", "port": 6980}`；启动时检测 `windows/vban/VBANServer/VBANServer.exe` 存在且未运行则自动拉起（CREATE_NO_WINDOW），target 留空或工具不存在自动跳过（纯单机零感知）。start-agent.cmd 里的手工 VBAN 启动段移除。修复：仅 CREATE_NO_WINDOW 时子进程继承启动者 stdout，启动者退出后句柄失效导致推流静默消失——补 stdin/stdout/stderr = DEVNULL 隔离（8 秒存活验证通过）。
 - **新增命名互斥体单实例守卫**：修复"一秒内双击两次仍双开"（旧的端口检测存在竞态窗口，同秒启动时查表扑空）。
+- **启动不再闪控制台窗口**：枚举本机 IP 的 `ipconfig`（udp_transport.py）与 VBAN 探测的 `tasklist` 均加 CREATE_NO_WINDOW——双击桌面图标后全程零画面变化（此前每次启动必闪一下黑窗）。
 - **"退出"语义**：先停按键注入线程再退出，托盘图标同步移除；不再需要任务管理器找进程。
 - 修复 ctypes 托盘两处 64 位陷阱：`Shell_NotifyIconW` 在 shell32 不在 user32；`DefWindowProcW` 必须显式声明 argtypes（wparam 为 64 位）。
 - README 重写：新增"30 秒看懂""日常怎么用"，多机章节按作者真实两机场景重述（按键走 DeskFlow、声音走 VBAN、每台电脑装什么、两关验收法）。

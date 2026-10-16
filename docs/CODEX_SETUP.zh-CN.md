@@ -16,7 +16,7 @@ Codex 可以帮助检查下载包、声卡、快捷键配置与端口，编辑�
 你选择的解压目录/
 ├─ docs/                         使用教程
 ├─ windows/
-│  ├─ AI-Passport-Voice.exe       可直接运行的电脑端
+│  ├─ AI-Passport-Voice-agent.8.exe       可直接运行的电脑端
 │  ├─ start.cmd                  日常启动
 │  ├─ diagnose.cmd               手动诊断
 │  ├─ voice-config.example.json  配置示例
@@ -50,9 +50,9 @@ Codex 可以帮助检查下载包、声卡、快捷键配置与端口，编辑�
 下面在**语音应用包的 windows 目录**用 PowerShell 执行：
 
 ```powershell
-.\AI-Passport-Voice.exe --list-keys
-.\AI-Passport-Voice.exe --list-devices
-.\AI-Passport-Voice.exe --diagnose
+.\AI-Passport-Voice-agent.8.exe --list-keys
+.\AI-Passport-Voice-agent.8.exe --list-devices
+.\AI-Passport-Voice-agent.8.exe --diagnose
 ```
 
 这些命令会结束，不会开始录音或模拟按键。自动执行时用 EXE，不用末尾会等待按键的 diagnose.cmd。

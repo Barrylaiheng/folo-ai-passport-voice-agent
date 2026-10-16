@@ -97,7 +97,10 @@ def _local_ip_addrs():
             # 解码会炸掉读线程 → 必须用 mbcs + errors=replace。
             out = subprocess.run(
                 ["ipconfig"], capture_output=True, timeout=5,
-                encoding="mbcs", errors="replace").stdout or ""
+                encoding="mbcs", errors="replace",
+                # pythonw/托盘模式下不能让它闪控制台黑窗
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ).stdout or ""
             for line in out.splitlines():
                 if "IPv4" not in line:
                     continue

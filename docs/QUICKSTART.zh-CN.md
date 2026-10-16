@@ -62,12 +62,12 @@ macOS、Linux 和 ARM Windows 不在当前语音应用包的验收范围。
 | 文件 | 用途 |
 | --- | --- |
 | **`start.cmd`** | 每天双击这个启动，不要单独拖出文件夹 |
-| **`AI-Passport-Voice.exe`** | 主程序，start.cmd 会自动调用 |
+| **`AI-Passport-Voice-agent.8.exe`** | 主程序，start.cmd 会自动调用 |
 | `diagnose.cmd` | 环境检查入口 |
 | `voice-config.example.json` | 配置样例；需要改键位时复制为 voice-config.json |
 | `install.cmd`、`.py` 文件 | 源码运行使用；有 EXE 的普通用户不用操作 |
 
-**完成标志：windows 文件夹里同时有 start.cmd 和 AI-Passport-Voice.exe。**
+**完成标志：windows 文件夹里同时有 start.cmd 和 AI-Passport-Voice-agent.8.exe。**
 不要直接在压缩软件里双击运行。想从桌面启动，可右键 start.cmd 创建快捷方式，再把快捷方式放到桌面。
 
 如果只有 `.py`、没有 EXE，通常下载的是 GitHub 的 **Source code (zip)** 或克隆的源码。
@@ -265,7 +265,7 @@ macOS、Linux 和 ARM Windows 不在当前语音应用包的验收范围。
 ```
 
 6. 保留英文双引号、逗号，最后一项后不要加逗号。保存为 **UTF-8**。
-7. 确认文件在 **AI-Passport-Voice.exe 旁边**，文件名不是 voice-config.json.txt。
+7. 确认文件在 **AI-Passport-Voice-agent.8.exe 旁边**，文件名不是 voice-config.json.txt。
 8. 双击 start.cmd，电脑窗口应显示 **热键: left-shift  模式: hold**。
 
 想改回右 Shift 时，把 hotkey_key 改为 **right-shift**，输入法也改为右 Shift，保存并重启转发窗口。
@@ -331,8 +331,8 @@ device_ip 仅在同一局域网允许单播、但广播发现受阻时有用，�
 Get-Content -LiteralPath .\voice-config.json -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 
 # 只列出键名或声卡，然后退出
-.\AI-Passport-Voice.exe --list-keys
-.\AI-Passport-Voice.exe --list-devices
+.\AI-Passport-Voice-agent.8.exe --list-keys
+.\AI-Passport-Voice-agent.8.exe --list-devices
 
 # 临时使用左 Shift；只影响本次运行，不会写回 JSON
 .\start.cmd --key left-shift --mode hold
@@ -450,7 +450,7 @@ Windows 自带语音输入可用 **Win + H** 打开，转发器也能模拟 `win
 Codex 或终端中不想等待“按任意键”时，用 EXE 入口：
 
 ```powershell
-.\AI-Passport-Voice.exe --diagnose
+.\AI-Passport-Voice-agent.8.exe --diagnose
 ```
 
 诊断不能确认 Windows 当前默认输入、输入法实际音源、设备音频到达或识别出字。

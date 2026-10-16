@@ -139,7 +139,8 @@ class UdpTransport:
                  link_timeout=LINK_TIMEOUT,
                  auto_recover=True,
                  device_ip=None,
-                 pair_token=None):
+                 pair_token=None,
+                 beacon_gate=None):
         self._port = int(port) if port else UDP_PORT
         self._bind_host = bind_host
         self._beacon_interval = beacon_interval
@@ -174,6 +175,14 @@ class UdpTransport:
         self._pending = []          # (type, payload) 订阅前缓冲
         self._device = None         # (ip, port) 由 recvfrom 学出
         self._device_last = 0.0     # 最近一次收到设备报文的单调时刻
+        self._beacon_gate = beacon_gate   # 可调用:True=本机应发设备 beacon(持票);False=让位
+        self._was_winner = None           # 持票/让位切换日志去重
+
+    def set_beacon_gate(self, fn):
+        """设置 beacon 发送门控：fn() 返回 True 时本机才向设备发 beacon(持票)，
+        返回 False 时让位（不发设备 beacon，设备会在超时后切给别的赢家）。
+        用于多机协调器自动切换持票权。fn=None 表示恒发（单台/关闭协调）。"""
+        self._beacon_gate = fn
 
     # -- 5 方法契约(对齐 BleakTransport) --
 
@@ -218,6 +227,15 @@ class UdpTransport:
         deadline = time.monotonic() + self._device_wait_timeout
         while (self._device is None and not self._stop
                and time.monotonic() < deadline):
+            # 多机协调模式(auto_switch):本机若不是持票方,无需苦等设备在 33333
+            # 回包(它只单播给当前赢家) —— 直接放行,让协调器运转;待本机被选为
+            # 赢家后 beacon 门控放开、设备自然连上来。避免非持票方卡死在此。
+            if self._beacon_gate is not None:
+                try:
+                    if not self._beacon_gate():
+                        break
+                except Exception:
+                    pass
             await asyncio.sleep(0.05)
         if self._device is None:
             await self.disconnect()
@@ -229,9 +247,13 @@ class UdpTransport:
         print(f"[udp] 发现设备 {self._device[0]}:{self._device[1]}")
 
     async def write_gatt_char(self, uuid, data):
-        """下行(EVENT 类型;uuid 忽略,UDP 无特征区分)。设备未知时抛 UdpError。"""
+        """下行(EVENT 类型;uuid 忽略,UDP 无特征区分)。
+
+        设备未知(self._device is None)时静默丢弃——多机协调模式下非持票方本就不
+        该下行,且不应因此抛错触发重连风暴;持票方连接成功后才会有设备地址。
+        """
         if self._sock is None or self._device is None:
-            raise UdpError("设备未连接,下行丢弃")
+            return
         if not self._sendto_device(T_EVENT, bytes(data)):
             raise UdpError("下行发送失败")
 
@@ -347,6 +369,27 @@ class UdpTransport:
             all_targets = list(targets)
             if self._device and self._device not in all_targets:
                 all_targets.append(self._device)
+            gate_ok = True
+            if self._beacon_gate is not None:
+                try:
+                    gate_ok = bool(self._beacon_gate())
+                except Exception:
+                    gate_ok = True   # 协调器异常时退化为恒发，避免设备失联
+            if not gate_ok:
+                # 非持票方：让位（不发设备 beacon）。状态翻转时才打印，避免刷屏。
+                if self._was_winner is not False:
+                    self._was_winner = False
+                    print("[coord] 本机非持票方,暂停向设备发 beacon(让位)",
+                          file=sys.stderr)
+                try:
+                    gap = 1.0 if self._device is None else self._beacon_interval
+                    await asyncio.sleep(gap)
+                except asyncio.CancelledError:
+                    return
+                continue
+            if self._was_winner is not True:
+                self._was_winner = True
+                print("[coord] 本机成为持票方,恢复向设备发 beacon", file=sys.stderr)
             for t_ip, t_port in all_targets:
                 try:
                     self._sock.sendto(pkt, (t_ip, t_port))
@@ -451,10 +494,15 @@ class UdpTransport:
     def _check_foreign_beacon(self, src_ip):
         """同局域网内其他电脑也在运行转发器 → 共用一台设备时会冲突,给出醒目标注。
 
-        仅在本实例未做"单设备隔离"(未配 device_ip / pair_token)时提醒——此时
-        任何另一台电脑的 beacon 都意味着可能抢同一台设备。已各自隔离(指定设备)
-        的场景不提醒,避免误报。限频 15s,不刷屏。
+        仅在本实例未做"单设备隔离"(未配 device_ip / pair_token)且**未开启自动切换
+        (auto_switch)**时提醒——此时任何另一台电脑的 beacon 都意味着可能抢同一台
+        设备。已各自隔离(指定设备)或已开启自动切换的场景不提醒:
+          - 自动切换模式下多机共存是设计内的,且此函数收到的 T_BEACON 实为设备回给
+            当前赢家的包(src 是设备 IP 而非其他电脑),原逻辑会误报,故直接跳过。
+        限频 15s,不刷屏。
         """
+        if self._beacon_gate is not None:
+            return                       # 自动切换模式:多机共存是设计内,跳过误报
         if self._isolated or src_ip in self._local_ips:
             return                       # 已隔离 / 自己的回环,忽略
         now = time.monotonic()
@@ -466,7 +514,7 @@ class UdpTransport:
             f"      若两台电脑共用同一台 AI Passport,设备会在两台电脑之间来回切换"
             f"(冲突),\n      导致按键文字跑到错误的电脑上。\n"
             f"      处理办法:同一台 AI Passport 同一时间只在一台电脑上运行转发器;\n"
-            f"      要在另一台电脑用时,先停止这一台,再在另一台启动。",
+            f"      或开启自动切换(auto_switch),让语音自动跟随焦点所在的电脑。",
             file=sys.stderr)
 
     def _route_frame(self, ftype, payload):

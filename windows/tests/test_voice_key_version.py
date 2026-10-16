@@ -7,9 +7,11 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import hotkey_forwarder as hf  # noqa: E402
 from hotkey_forwarder import (  # noqa: E402
     BUILTIN_VOICE_KEY_RULES,
     Forwarder,
@@ -18,12 +20,16 @@ from hotkey_forwarder import (  # noqa: E402
 
 
 def _stub(version_by_path=None):
-    """构造只带 _exe_version/_resolve_voice_key 的最小宿主。"""
+    """构造只带版本解析与长按注入的最小宿主。"""
     class _Host:
         _ver_cache = {}
 
         _exe_version = Forwarder._exe_version
         _resolve_voice_key = Forwarder._resolve_voice_key
+        _resolve_voice_key_mode = Forwarder._resolve_voice_key_mode
+        _match_voice_rule = staticmethod(Forwarder._match_voice_rule)
+        _press_hold_voice_key = Forwarder._press_hold_voice_key
+        _release_held_voice_key = Forwarder._release_held_voice_key
 
     host = _Host()
     host._ver_cache = dict(version_by_path or {})
@@ -132,7 +138,75 @@ class TestResolveVoiceKey(unittest.TestCase):
 
     def test_builtin_table_covers_workbuddy(self):
         self.assertIn("workbuddy.exe", BUILTIN_VOICE_KEY_RULES)
-        self.assertEqual(BUILTIN_VOICE_KEY_RULES["workbuddy.exe"][0]["key"], "alt")
+        rule = BUILTIN_VOICE_KEY_RULES["workbuddy.exe"][0]
+        self.assertEqual(rule["key"], "alt")
+        self.assertEqual(rule["mode"], "hold")  # 5.8.3 是"长按"手势, 非 tap
+
+
+class TestVoiceKeyMode(unittest.TestCase):
+    WB = {"title_contains": "WorkBuddy", "voice_key": "ctrl+d"}
+
+    def test_583_mode_is_hold(self):
+        host = _stub({r"C:\Program Files\WorkBuddy\WorkBuddy.exe": (5, 8, 3, 0)})
+        self.assertEqual(host._resolve_voice_key_mode(
+            self.WB, r"C:\Program Files\WorkBuddy\WorkBuddy.exe"), "hold")
+
+    def test_old_version_mode_is_tap(self):
+        host = _stub({r"C:\Program Files\WorkBuddy\WorkBuddy.exe": (5, 8, 2, 0)})
+        self.assertEqual(host._resolve_voice_key_mode(
+            self.WB, r"C:\Program Files\WorkBuddy\WorkBuddy.exe"), "tap")
+
+    def test_explicit_mode_overrides(self):
+        app = dict(self.WB, voice_key_mode="tap")
+        host = _stub({r"C:\Program Files\WorkBuddy\WorkBuddy.exe": (5, 8, 3, 0)})
+        self.assertEqual(host._resolve_voice_key_mode(
+            app, r"C:\Program Files\WorkBuddy\WorkBuddy.exe"), "tap")
+
+
+class TestHoldInjection(unittest.TestCase):
+    """长按型语音键: 开录按下保持, 停录抬起; 断链兜底释放。"""
+
+    def setUp(self):
+        self.sent = []
+        p1 = mock.patch.object(hf, "_send_key",
+                               side_effect=lambda *a, **kw: self.sent.append((a, kw)))
+        p2 = mock.patch.object(hf.time, "sleep")
+        p3 = mock.patch.object(hf, "attach_to_default_desktop")
+        for p in (p1, p2, p3):
+            p.start()
+            self.addCleanup(p.stop)
+        self.host = _stub()
+        self.host._vk_held = None
+
+    def test_start_holds_key_down(self):
+        self.host._press_hold_voice_key("alt", "开始语音(UP按下)")
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(self.sent[0][1]["up"])
+        self.assertIsNotNone(self.host._vk_held)
+
+    def test_stop_releases_key_up(self):
+        self.host._press_hold_voice_key("alt", "开始语音(UP按下)")
+        n = len(self.sent)
+        self.host._release_held_voice_key("停止语音(UP松开)")
+        self.assertEqual(len(self.sent), n + 1)
+        self.assertTrue(self.sent[-1][1]["up"])
+        self.assertIsNone(self.host._vk_held)
+
+    def test_duplicate_start_ignored(self):
+        self.host._press_hold_voice_key("alt", "开始语音(UP按下)")
+        n = len(self.sent)
+        self.host._press_hold_voice_key("alt", "开始语音(UP按下)")
+        self.assertEqual(len(self.sent), n)  # 已按住不重复
+
+    def test_stop_without_hold_noop(self):
+        self.host._release_held_voice_key("停止语音(UP松开)")
+        self.assertEqual(self.sent, [])
+
+    def test_start_action_with_stop_word_releases(self):
+        # press_hold 内部再收"停止"动作时转释放(防御性)
+        self.host._press_hold_voice_key("alt", "开始语音(UP按下)")
+        self.host._press_hold_voice_key("alt", "停止残留语音")
+        self.assertTrue(self.sent[-1][1]["up"])
 
 
 if __name__ == "__main__":

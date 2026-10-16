@@ -663,15 +663,16 @@ def _parse_version(text):
 
 
 # 内置"已知应用的语音热键版本规则"(按 exe 文件名小写匹配)。
-# 背景: WorkBuddy 5.8.3 把「语音录音开关」默认热键从 ctrl+d 改成单独 alt
-# (渲染层注册表 {"id":"toggle-voice-recording","defaultWin":"Alt",
-#  "voiceModifierOnly":true}; B 机实测注入 alt 可正常开关录音)。
+# 背景: WorkBuddy 5.8.3 把「语音录音开关」默认热键从 ctrl+d(点击 toggle)
+# 改成 **长按 Alt**(渲染层注册表 {"id":"toggle-voice-recording",
+# "defaultWin":"Alt","voiceModifierOnly":true}; 设置页显示"长按 Alt";
+# 实测短 tap 不触发, 须按住保持)。
 # 原则(2026-10-16 拍板): 兼容性由转发器做, 不要求用户去应用里改热键。
 # 用户在应用里显式改过热键的, 在 voice-config.json 该应用条目加
 # "voice_key_rules": [] 即可关闭内置适配、回落到 voice_key。
 BUILTIN_VOICE_KEY_RULES = {
     "workbuddy.exe": [
-        {"since": "5.8.3", "key": "alt"},
+        {"since": "5.8.3", "key": "alt", "mode": "hold"},
     ],
 }
 
@@ -866,6 +867,12 @@ class Forwarder:
                     self.sink.clear()
         finally:
             self.injector.stop()
+            # 长按型语音键(WorkBuddy 5.8.3 "长按 Alt")兜底: 断链/音频超时
+            # 时若还按着, 必须抬起, 否则 Alt 卡死会干扰用户一切组合键。
+            try:
+                self._release_held_voice_key("链路复位")
+            except Exception:
+                pass
 
     def check_health(self, now=None):
         now = time.monotonic() if now is None else now
@@ -905,27 +912,48 @@ class Forwarder:
             cache[exe_path] = v
         return v
 
-    def _resolve_voice_key(self, app, exe_path=""):
-        """解析该应用当前生效的语音热键(版本感知, 2026-10-16)。
+    @staticmethod
+    def _match_voice_rule(app, exe_path, ver):
+        """按 exe 版本匹配该应用的语音热键规则; 无规则返回 None。
 
-        优先级: 配置显式 voice_key_rules > 内置版本规则 > 配置 voice_key。
-        exe 路径为空或版本读不到 → 回落 voice_key(保守, 不猜)。
+        优先级: 配置显式 voice_key_rules > 内置 BUILTIN_VOICE_KEY_RULES。
+        版本读不到(ver 为空)→ 不猜, 返回 None(回落 voice_key)。
         """
-        if not app:
-            return None
         rules = app.get("voice_key_rules")
         if rules is None:
             name = (exe_path or "").replace("/", "\\").rsplit("\\", 1)[-1].lower()
             rules = BUILTIN_VOICE_KEY_RULES.get(name)
         if not rules:
-            return app.get("voice_key")
-        ver = self._exe_version(exe_path)
+            return None
         best, best_since = None, ()
         for r in rules:
             since = _parse_version(r.get("since", "0"))
             if ver and ver >= since and since >= best_since:
                 best, best_since = r, since
-        return (best or {}).get("key") or app.get("voice_key")
+        return best
+
+    def _resolve_voice_key(self, app, exe_path=""):
+        """解析该应用当前生效的语音热键(版本感知, 2026-10-16)。"""
+        if not app:
+            return None
+        rule = self._match_voice_rule(app, exe_path, self._exe_version(exe_path))
+        if rule:
+            return rule.get("key") or app.get("voice_key")
+        return app.get("voice_key")
+
+    def _resolve_voice_key_mode(self, app, exe_path=""):
+        """解析语音键手势: 'tap'=点击式 toggle; 'hold'=长按(开录按下保持,停录抬起)。
+
+        WorkBuddy 5.8.3 起「语音录音开关」显示为"长按 Alt", 短 tap 不触发,
+        故内置规则带 mode=hold —— 恰与设备"按住 UP 说话"的语义天然对齐。
+        """
+        if not app:
+            return "tap"
+        m = app.get("voice_key_mode")
+        if m:
+            return m
+        rule = self._match_voice_rule(app, exe_path, self._exe_version(exe_path))
+        return (rule or {}).get("mode") or "tap"
 
     def _tap_key(self, spec, label):
         """向当前前台窗口注入一次完整按键点击, 用于触发/切换快捷键。
@@ -1133,6 +1161,11 @@ class Forwarder:
         不动它); 前台被抢(用户在开发任何东西时都会发生) → 焦点观察器锚定
         "用户最近在用的 Agent"确定性找回, 与抢焦点者是谁无关。
         """
+        # 长按型语音键(WorkBuddy 5.8.3 "长按 Alt"): 停录=抬起即可, 无需找回
+        # 窗口 —— 抬键是全局键盘状态, 与前台是谁无关, 抢先处理避免多余动作。
+        if getattr(self, "_vk_held", None) and ("停止" in action or "松开" in action):
+            self._release_held_voice_key(action)
+            return
         hwnd, title = get_foreground_window_title()
         exe = get_foreground_process_name()
         app = self._match_app(title, exe) if hwnd else None
@@ -1196,8 +1229,42 @@ class Forwarder:
             print(f"[voice-key] Agent {app.get('title_contains')!r} "
                   f"无生效语音热键; 跳过注入")
             return
+        mode = self._resolve_voice_key_mode(app, exe_for_ver)
+        if mode == "hold":
+            self._press_hold_voice_key(vk, action)
+            return
         print(f"[voice-key] 前台={title!r} → 注入 {vk}")
         self._tap_key(vk, action)
+
+    def _press_hold_voice_key(self, vk, action):
+        """长按型语音键: 开录=按下保持不放, 停录=抬起(见 _release_held_voice_key)。"""
+        if "停止" in action or "松开" in action:
+            self._release_held_voice_key(action)
+            return
+        if getattr(self, "_vk_held", None):
+            return  # 已按住(漏收停录的兜底), 不重复按下
+        keys = resolve_key_spec(vk)
+        mods, last = keys[:-1], keys[-1]
+        attach_to_default_desktop()
+        for _n, v, s, e in mods:
+            _send_key(v, s, e, up=False)
+            time.sleep(0.03)
+        _send_key(last[1], last[2], last[3], up=False)
+        self._vk_held = (mods, last, vk)
+        print(f"[key] {vk} 按住(长按型语音键, 开录; 设备松手后抬起)")
+
+    def _release_held_voice_key(self, action=""):
+        """抬起按住中的长按型语音键。断链/退出时也须调用, 防 Alt 卡死。"""
+        held = getattr(self, "_vk_held", None)
+        if not held:
+            return
+        mods, last, vk = held
+        attach_to_default_desktop()
+        _send_key(last[1], last[2], last[3], up=True)
+        for _n, v, s, e in reversed(mods):
+            _send_key(v, s, e, up=True)
+        self._vk_held = None
+        print(f"[key] {vk} 抬起(长按型语音键, {action or '停录'})")
 
     def on_event(self, payload):
         try:

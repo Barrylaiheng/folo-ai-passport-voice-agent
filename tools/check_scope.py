@@ -18,6 +18,8 @@ for name in sorted(files):
     assert not name.startswith(('firmware/', 'source/', 'backups/', 'dist/', 'build/')), name
     assert p.suffix.lower() not in {'.bin', '.exe', '.elf', '.map', '.zip', '.log', '.pyc'}, name
     assert p.name not in {'sdkconfig', 'sdkconfig.old', 'voice-config.json', 'muse_avatar_frames.c'}, name
+    if p.suffix.lower() in {'.ico', '.png', '.jpg', '.jpeg', '.gif', '.webp'}:
+        continue  # binary assets: no text/secret scan
     text = p.read_text(encoding='utf-8-sig')
     if name != 'tools/check_scope.py':
         assert not re.search(r'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|mgst_[A-Za-z0-9_-]{24,}|192\.168\.5\.4|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----', text), name

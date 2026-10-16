@@ -9,5 +9,11 @@
     {"title_contains": "Trae", "exe_contains": "Trae CN", "voice_key": "alt+v", "stop_on_release": true, "cdp_port": 9222}
   ],
   "hotkey_key": "right-shift",
-  "hotkey_mode": "hold"
+  "hotkey_mode": "hold",
+  "vban": {
+    "target": "",
+    "port": 6980,
+    "samplerate": 48000,
+    "channels": 2
+  }
 }

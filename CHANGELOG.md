@@ -1,5 +1,26 @@
 # 更新日志
 
+## 0.3.0-agent.8 · 2026-10-16（系统托盘：双击即用、右下角看状态、无窗口常驻）
+
+针对"日常使用 = 双击桌面图标就能用"的运营目标，把转发器从"黑窗口后台程序"升级为"托盘常驻服务"：
+
+- **新增系统托盘**（`windows/tray_icon.py`，纯 ctypes / Shell_NotifyIconW，**零第三方依赖**）：右下角常驻小图标（passport-voice.ico），点开即见**运行状态**（设备在线/未连接 · 已运行时长），菜单 = 打开日志（forwarder.log）/ 退出。托盘不可用时自动降级为无托盘后台运行，不影响本体。
+- **静默启动**：`start-agent-tray.cmd` 经 pythonw 无窗口启动；新增 `windows/create-desktop-shortcut.cmd` 一键生成桌面图标（直指 pythonw，双击零窗口闪现），"日常 = 双击桌面图标"开箱即成。pythonw 下 stdout/stderr 为 None 的问题已在 main() 入口兜底重定向。
+- **VBAN 推流改为转发器自动管理**：`voice-config.json` 新增 `"vban": {"target": "B机IP", "port": 6980}`；启动时检测 `windows/vban/VBANServer/VBANServer.exe` 存在且未运行则自动拉起（CREATE_NO_WINDOW），target 留空或工具不存在自动跳过（纯单机零感知）。start-agent.cmd 里的手工 VBAN 启动段移除。修复：仅 CREATE_NO_WINDOW 时子进程继承启动者 stdout，启动者退出后句柄失效导致推流静默消失——补 stdin/stdout/stderr = DEVNULL 隔离（8 秒存活验证通过）。
+- **新增命名互斥体单实例守卫**：修复"一秒内双击两次仍双开"（旧的端口检测存在竞态窗口，同秒启动时查表扑空）。
+- **"退出"语义**：先停按键注入线程再退出，托盘图标同步移除；不再需要任务管理器找进程。
+- 修复 ctypes 托盘两处 64 位陷阱：`Shell_NotifyIconW` 在 shell32 不在 user32；`DefWindowProcW` 必须显式声明 argtypes（wparam 为 64 位）。
+- README 重写：新增"30 秒看懂""日常怎么用"，多机章节按作者真实两机场景重述（按键走 DeskFlow、声音走 VBAN、每台电脑装什么、两关验收法）。
+- 全套 46 项单元测试通过。
+
+## 0.3.0-agent.7 · 2026-10-16（适配 WorkBuddy 5.8.3 长按 Alt 手势）
+
+实测发现 5.8.3 的语音手势从"点击切换"改成**长按 Alt**（按住说话、松开停录），单纯注入 Alt 点击无效。agent.6 的版本规则升级为 `alt:hold`：
+
+- hold 型热键注入：**按下保持**（开录）/ **抬起释放**（停录），与"按住说话"节奏对齐；
+- `finish()` 挂接长按键释放兜底（断链时不残留按住状态）；CDP 回退路径同步适配；
+- 新增长按语义单元测试，全套 46 项通过。
+
 ## 0.3.0-agent.6 · 2026-10-16（版本感知热键：WorkBuddy 5.8.3 自动适配 Alt）
 
 WorkBuddy 5.8.3 把「语音录音开关」默认热键从 Ctrl+D 改成单独 Alt（渲染层注册表 `{"id":"toggle-voice-recording","defaultWin":"Alt","voiceModifierOnly":true}`，实测注入 Alt 可正常开关录音），导致所有转发器用户升级即断链。本次让转发器**自动适配，用户零操作**：

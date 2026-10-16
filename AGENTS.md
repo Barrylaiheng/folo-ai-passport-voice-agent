@@ -12,6 +12,7 @@ FoloToy AI Passport 硬件按键 → WiFi UDP → 本机转发器 → 向目标 
 | 文件 | 职责 |
 | --- | --- |
 | `hotkey_forwarder.py` | 主程序：UDP 事件循环、音频桥（VB-Cable）、按键策略（Agent 模式/输入法模式）、焦点观察器、确定性窗口找回、CDP 调度 |
+| `tray_icon.py` | 系统托盘（纯 ctypes，零依赖）：右下角常驻图标，托盘菜单 = 打开日志 / 退出；不可用时自动降级为无托盘运行 |
 | `udp_transport.py` | 设备侧 UDP 协议：beacon 发现、ADPCM 音频流、事件收发、令牌校验 |
 | `trae_cdp.py` | Trae（Chromium/Electron）CDP 直连：点麦克风/完成键。**只认 `vscode-file://vscode-app`/workbench 页面**，防止误连占用同一调试端口的其他程序 |
 | `adpcm.py` | ADPCM 音频解码 |
@@ -46,6 +47,8 @@ if (!(Test-Path voice-config.json)) { Copy-Item voice-config.example.json voice-
 # 启动（前台运行便于看日志；后台常驻用户可自行最小化）
 cd windows
 .venv\Scripts\python.exe -u hotkey_forwarder.py
+# 或托盘模式（无控制台窗口，右下角托盘图标；日常推荐，等价于双击 start-agent-tray.cmd）
+# .venv\Scripts\pythonw.exe -u hotkey_forwarder.py
 ```
 
 验收顺序（必须让用户亲自操作，AI 只能看日志）：

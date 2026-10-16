@@ -42,6 +42,13 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 程序"落脚目录": 源码运行=脚本目录; PyInstaller 单文件 exe=exe 所在目录
+# (onefile 的 __file__ 指向临时解包目录, 日志/图标/VBAN/配置都必须跟着 exe 走)
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 import adpcm
 from udp_transport import UdpTransport, UdpError, EVENT_UUID, AUDIO_UUID
 from trae_cdp import CdpClient
@@ -1609,7 +1616,62 @@ def kill_stale_instances(port=33333):
         kernel32.CloseHandle(h)
 
 
+def _maybe_start_vban(cfg):
+    """多机场景: 自动拉起 VBAN 发送端, 把 Passport 声音推给其他电脑。
+
+    - 找 windows/vban/VBANServer/VBANServer.exe, 不存在 = 单机用户, 静默跳过;
+    - 已有 VBANServer.exe 在跑就不重复启动;
+    - 目标 IP 从 voice-config.json 的 "vban": {"target": "x.x.x.x", "port": 6980}
+      读取, target 为空 = 不推流(纯单机);
+    - 无控制台窗口(托盘/pythonw 模式), 子进程也用 CREATE_NO_WINDOW。
+    """
+    base = APP_DIR
+    exe = os.path.join(base, "vban", "VBANServer", "VBANServer.exe")
+    if not os.path.isfile(exe):
+        return None
+    try:
+        import subprocess
+        probe = subprocess.run(["tasklist", "/FI", "IMAGENAME eq VBANServer.exe"],
+                               capture_output=True, text=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if "VBANServer" in (probe.stdout or ""):
+            print("[vban] VBANServer 已在运行, 不重复启动")
+            return "already"
+    except Exception:
+        pass
+    vban = cfg.get("vban") or {}
+    target = str(vban.get("target") or "").strip()
+    if not target:
+        print("[vban] 检测到 vban/VBANServer 但配置未填 vban.target, 跳过推流")
+        return None
+    port = str(vban.get("port") or 6980)
+    samplerate = str(vban.get("samplerate") or 48000)
+    channels = str(vban.get("channels") or 2)
+    try:
+        import subprocess
+        subprocess.Popen(
+            [exe, "--device", "CABLE", "--samplerate", samplerate,
+             "--channels", channels, "--target", target, "--port", port],
+            cwd=os.path.join(base, "vban", "VBANServer"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        print(f"[vban] 音频串流已启动: CABLE → {target}:{port} "
+              f"({samplerate}Hz/{channels}ch, 单机/其他电脑收流看 README 多机章节)")
+        return target
+    except Exception as e:
+        print(f"[vban] VBANServer 启动失败({e}); 仅影响多机音频, 不影响本机")
+        return None
+
+
 def main():
+    # pythonw 静默运行(托盘模式)时 stdout/stderr 为 None, 后面任何 print
+    # 都会崩, 先兜底重定向; 日志稍后统一切到 forwarder.log
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
     cfg = load_local_config()
     default_key = str(cfg.get("hotkey_key") or "right-shift")
     default_mode = str(cfg.get("hotkey_mode") or "hold")
@@ -1702,8 +1764,7 @@ def main():
                 except Exception:
                     pass
 
-    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "forwarder.log")
+    _log_path = os.path.join(APP_DIR, "forwarder.log")
     try:
         _log_f = open(_log_path, "a", encoding="utf-8", buffering=1)
         sys.stdout = _Tee(sys.stdout, _log_f)
@@ -1714,7 +1775,23 @@ def main():
     except OSError as e:
         print(f"[log] 警告: 无法写日志文件({e}), 仅控制台输出")
 
+    # 单实例守卫: 端口守卫(kill_stale_instances)依赖"旧实例已绑定端口",
+    # 同一秒内双击两次时有竞态窗口(新实例还没绑端口就被查表), 这里用
+    # 命名互斥体兜底 —— 持有者退出前, 任何重复启动直接自行退出
+    try:
+        _mutex = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "DaDaPassportVoiceMutex")
+        if ctypes.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            print("[guard] 检测到转发器已在运行(看右下角托盘), 本次重复启动退出")
+            time.sleep(2)
+            return
+    except Exception as _guard_err:
+        print(f"[guard] 单实例守卫不可用({_guard_err}), 继续启动")
+
     make_console_unfocusable()
+
+    # 多机音频串流: 有 vban/VBANServer 且配置了 vban.target 时自动拉起
+    _maybe_start_vban(cfg)
 
     if args.test_key:
         fwd_probe = Forwarder.__new__(Forwarder)
@@ -1790,6 +1867,41 @@ def main():
     print("=" * 66)
     print(f"模式: {fwd.trigger_mode}  发送键: {fwd.send_key}  "
           f"音频: {'关闭' if args.no_audio else ('→ ' + fwd.sink.device_name if fwd.sink.enabled else '未就绪(装 VB-Cable 后重启本程序)')}")
+    # 系统托盘(可选): 右下角常驻图标, 显示运行状态, 菜单 = 日志/退出
+    _t0 = time.time()
+
+    def _tray_status():
+        try:
+            age = time.time() - getattr(fwd, "_last_hello_at", -1e9)
+            if age < 0:
+                dev = "等待设备…"
+            elif age < 10:
+                dev = "设备在线"
+            else:
+                dev = "设备未连接"
+            mins = int((time.time() - _t0) // 60)
+            return f"{dev} · 已运行 {mins} 分钟"
+        except Exception:
+            return "运行中"
+
+    try:
+        from tray_icon import start_tray
+
+        def _on_tray_quit():
+            try:
+                fwd.injector.stop()
+            except Exception:
+                pass
+            os._exit(0)  # 转发器无状态(UDP+注入线程), 停注入器后硬退出
+
+        _ico = os.path.join(APP_DIR, "passport-voice.ico")
+        if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
+                      status_fn=_tray_status):
+            print("[tray] 托盘图标已启动: 右下角可看运行状态/打开日志/退出")
+        else:
+            print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")
+    except Exception as _tray_err:
+        print(f"[tray] 托盘启动失败({_tray_err}), 继续无托盘运行")
     try:
         asyncio.run(fwd.run())
     except KeyboardInterrupt:

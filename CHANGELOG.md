@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.3.0-agent.6 · 2026-10-16（版本感知热键：WorkBuddy 5.8.3 自动适配 Alt）
+
+WorkBuddy 5.8.3 把「语音录音开关」默认热键从 Ctrl+D 改成单独 Alt（渲染层注册表 `{"id":"toggle-voice-recording","defaultWin":"Alt","voiceModifierOnly":true}`，实测注入 Alt 可正常开关录音），导致所有转发器用户升级即断链。本次让转发器**自动适配，用户零操作**：
+
+- **版本感知解析**：注入前读前台 Agent 的 exe 文件版本（ctypes VerQueryValue，带缓存），命中内置规则表 `BUILTIN_VOICE_KEY_RULES` 则按版本选键 —— WorkBuddy ≥5.8.3 注 `alt`，旧版仍注 `ctrl+d`；其他应用（如 Trae `alt+v`）不受影响。
+- **配置逃生舱**：应用内显式改过热键的用户，在 voice-config.json 对应条目加 `"voice_key_rules": []` 锁定 `voice_key`；也可用 `"voice_key_rules": [{"since":"x.y.z","key":"..."}]` 自定义版本规则。
+- **两条注入路径都适配**：主路径（含焦点找回 —— 找回场景用目标 Agent 自己窗口的 exe 判版本，而非抢焦点者）与 CDP 键盘回退路径。
+- 依据两机联调结论：兼容性由转发器做，不要求用户去改应用设置。
+- 新增 17 项单元测试（版本解析/规则裁决/真机 WorkBuddy.exe 实测），全套 38 项通过。
+
 ## 0.3.0-agent.5 · 2026-10-16（DeskFlow 用户须知：按键跨机、音频不跨机）
 
 依据两机 DeskFlow 场景的本机取证调研，在 README / QUICKSTART / TROUBLESHOOTING 补充"DeskFlow 用户须知"：

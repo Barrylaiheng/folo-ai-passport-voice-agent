@@ -156,8 +156,12 @@ class ForwarderDispatchTest(unittest.TestCase):
 class ForwarderMicDispatchTest(unittest.TestCase):
     """Agent 模式(mic)的派发测试: apps 配置里的语音键按 start/release 各注入一次。"""
 
+    # voice_key_rules=[] 锁定热键: 本用例验证 ctrl+d 组合键注入本身,
+    # 不参与版本自适应(否则在装了 WorkBuddy 5.8.3+ 的机器上会解析成
+    # 单键 alt, 事件数对不上 —— 版本自适应行为另见 test_voice_key_version)
     APPS = [{"title_contains": "WorkBuddy", "exe_contains": "WorkBuddy",
-             "voice_key": "ctrl+d", "stop_on_release": True}]
+             "voice_key": "ctrl+d", "voice_key_rules": [],
+             "stop_on_release": True}]
 
     def make_forwarder(self):
         args = argparse.Namespace(

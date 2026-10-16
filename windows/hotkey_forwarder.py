@@ -610,6 +610,72 @@ def get_foreground_process_name():
     return _proc_name_for_pid(pid.value)
 
 
+def _hwnd_exe_path(hwnd):
+    """返回指定窗口所属进程的 exe 完整路径(失败返回 "")。
+
+    版本感知热键要用: 焦点找回场景下前台可能是抢焦点者, 必须取
+    目标 Agent 自己窗口的 exe, 而非总是取前台窗口。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        pid = ctypes.c_uint32(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return _proc_name_for_pid(pid.value)
+    except Exception:
+        return ""
+
+
+def _file_version(path):
+    """读 exe 文件版本 → (major, minor, patch, build); 失败/无版本资源返回 ()。"""
+    try:
+        ver = ctypes.windll.version
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ()
+        data = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, data):
+            return ()
+        lp = ctypes.c_void_p(0)
+        ln = ctypes.c_uint(0)
+        if not ver.VerQueryValueW(data, "\\", ctypes.byref(lp), ctypes.byref(ln)):
+            return ()
+        if not lp or ln.value < 13 * 4:  # VS_FIXEDFILEINFO 至少 13 个 DWORD
+            return ()
+        # 布局: [0]签名 [1]结构版本 [2]FileVersionMS [3]FileVersionLS ...
+        ms = ctypes.c_uint.from_address(lp.value + 8).value
+        ls = ctypes.c_uint.from_address(lp.value + 12).value
+        return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+    except Exception:
+        return ()
+
+
+def _parse_version(text):
+    """'5.8.3' → (5, 8, 3, 0); 解析失败返回 ()。"""
+    parts = []
+    for piece in str(text or "").replace("-", ".").replace("+", ".").split("."):
+        if piece.isdigit():
+            parts.append(int(piece))
+        elif parts:
+            break
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+# 内置"已知应用的语音热键版本规则"(按 exe 文件名小写匹配)。
+# 背景: WorkBuddy 5.8.3 把「语音录音开关」默认热键从 ctrl+d 改成单独 alt
+# (渲染层注册表 {"id":"toggle-voice-recording","defaultWin":"Alt",
+#  "voiceModifierOnly":true}; B 机实测注入 alt 可正常开关录音)。
+# 原则(2026-10-16 拍板): 兼容性由转发器做, 不要求用户去应用里改热键。
+# 用户在应用里显式改过热键的, 在 voice-config.json 该应用条目加
+# "voice_key_rules": [] 即可关闭内置适配、回落到 voice_key。
+BUILTIN_VOICE_KEY_RULES = {
+    "workbuddy.exe": [
+        {"since": "5.8.3", "key": "alt"},
+    ],
+}
+
+
 def make_console_unfocusable():
     """把本程序控制台窗口设为 NOACTIVATE 并隐藏, 使其永远无法抢前台焦点。
 
@@ -826,6 +892,41 @@ class Forwarder:
                 return app
         return None
 
+    def _exe_version(self, exe_path):
+        """带缓存的 exe 版本查询(同一 exe 只读一次文件)。"""
+        if not exe_path:
+            return ()
+        cache = getattr(self, "_ver_cache", None)
+        if cache is None:
+            cache = self._ver_cache = {}
+        v = cache.get(exe_path)
+        if v is None:
+            v = _file_version(exe_path)
+            cache[exe_path] = v
+        return v
+
+    def _resolve_voice_key(self, app, exe_path=""):
+        """解析该应用当前生效的语音热键(版本感知, 2026-10-16)。
+
+        优先级: 配置显式 voice_key_rules > 内置版本规则 > 配置 voice_key。
+        exe 路径为空或版本读不到 → 回落 voice_key(保守, 不猜)。
+        """
+        if not app:
+            return None
+        rules = app.get("voice_key_rules")
+        if rules is None:
+            name = (exe_path or "").replace("/", "\\").rsplit("\\", 1)[-1].lower()
+            rules = BUILTIN_VOICE_KEY_RULES.get(name)
+        if not rules:
+            return app.get("voice_key")
+        ver = self._exe_version(exe_path)
+        best, best_since = None, ()
+        for r in rules:
+            since = _parse_version(r.get("since", "0"))
+            if ver and ver >= since and since >= best_since:
+                best, best_since = r, since
+        return (best or {}).get("key") or app.get("voice_key")
+
     def _tap_key(self, spec, label):
         """向当前前台窗口注入一次完整按键点击, 用于触发/切换快捷键。
 
@@ -930,17 +1031,25 @@ class Forwarder:
         用户本来就在 Agent 里时不动焦点(手动点进输入框的场景)。
         """
         app = self.cdp_app
-        vk = (app or {}).get("voice_key")
-        if not vk:
+        if not (app and (app.get("voice_key")
+                         or app.get("voice_key_rules") is not None)):
             return
         try:
             hwnd, title = get_foreground_window_title()
             exe = get_foreground_process_name() if hwnd else ""
-            if not (hwnd and self._match_app(title, exe)):
+            matched = self._match_app(title, exe) if hwnd else None
+            if not (hwnd and matched):
                 hwnd, title = self._recover_agent(app)
                 if not hwnd:
                     print("[cdp] 回退注入失败: 找不回 Agent 窗口")
                     return
+                exe = _hwnd_exe_path(hwnd)  # 用找回窗口自己的 exe 判版本
+            elif matched is not app:
+                exe = ""  # 前台是别的 Agent, 别拿它的 exe 判版本
+            vk = self._resolve_voice_key(app, exe or "")
+            if not vk:
+                print("[cdp] 回退注入失败: 无生效语音热键")
+                return
             self._tap_key(vk, action)
             print(f"[cdp] 已回退键盘注入 {vk}")
         except Exception as e:
@@ -1027,6 +1136,7 @@ class Forwarder:
         hwnd, title = get_foreground_window_title()
         exe = get_foreground_process_name()
         app = self._match_app(title, exe) if hwnd else None
+        fg_app = app  # 前台命中时 app 即它; 找回场景 app 会被换成目标 Agent
         # === CDP 快速路径(可选优化, 非依赖): 直接点麦克风, 不必切窗口/抢焦点 ===
         # 触发条件: ①前台就是配了 cdp_port 的应用; ②上一拍正是 CDP 开录的
         # (保证"松手停录"也走 CDP, 哪怕松手瞬间用户焦点已在别处)。
@@ -1078,8 +1188,16 @@ class Forwarder:
                 print(f"[voice-key] 先注入聊天聚焦键 {fk}")
                 self._tap_key(fk, "聚焦聊天输入框")
                 time.sleep(0.35)
-        print(f"[voice-key] 前台={title!r} → 注入 {app['voice_key']}")
-        self._tap_key(app["voice_key"], action)
+        # 版本感知热键(2026-10-16): WorkBuddy 5.8.3+ 默认热键改为单独 alt。
+        # 找回场景必须用目标 Agent 自己窗口的 exe 判版本(前台可能是抢焦点者)。
+        exe_for_ver = exe if app is fg_app else _hwnd_exe_path(hwnd)
+        vk = self._resolve_voice_key(app, exe_for_ver)
+        if not vk:
+            print(f"[voice-key] Agent {app.get('title_contains')!r} "
+                  f"无生效语音热键; 跳过注入")
+            return
+        print(f"[voice-key] 前台={title!r} → 注入 {vk}")
+        self._tap_key(vk, action)
 
     def on_event(self, payload):
         try:
@@ -1591,6 +1709,8 @@ def main():
             f"{a.get('voice_key')}"
             for a in (fwd.apps or []) if a.get("voice_key")) or "见配置"
         print(f"      UP 键按下 → 注入该 Agent 语音快捷键开始录({_app_sum}, Agent 自转录)")
+        print("      注: 内置版本自适应 —— WorkBuddy 5.8.3+ 默认热键自动改注 alt;")
+        print("         在应用里改过热键的, 配置该应用加 \"voice_key_rules\": [] 关闭适配")
         print("   4. 松开 UP → 再注入一次该语音键停录(不发送); 核对文字后按设备 DOWN 键回车发送")
         print("   5. 无需校准坐标; 只要前台窗口是已配置 Agent 即可(应用标题含 WorkBuddy / Trae)")
     else:

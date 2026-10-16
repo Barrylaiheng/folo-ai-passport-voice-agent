@@ -72,25 +72,22 @@ class UdpError(Exception):
     """Wi-Fi UDP 通道错误(端口占用/等不到设备/未连接/发送失败)。"""
 
 
-def _local_broadcast_addrs(port):
-    """本机所有私网 IPv4 的定向广播 + 受限广播。
+def _local_ip_addrs():
+    """本机所有 IPv4 点分地址集合。
 
-    多网卡(网线+WiFi 同网段/代理 TUN)时,255.255.255.255 从哪个口出去由
-    系统路由决定,可能发错口导致设备收不到 beacon(实测踩过)。对每个私网
-    网段都发一份定向广播(x.y.z.255),哪个口能通走哪个。
+    用于识别"收到的 beacon 是不是自己广播出去的回环"——区分"自己的回环"
+    与"同一局域网内另一台电脑的转发器发出的 beacon"(后者是情况二冲突的信号)。
 
-    IP 枚举双通道并集:gethostbyname_ex 走系统 DNS,在 Mihomo/Clash TUN
-    (fake-ip 劫持 hostname 解析)下会漏掉局域网 IP(2026-09-13 实测:该窗口
-    beacon 目标只剩 TUN/WSL 广播段,设备永远 OFFLINE),所以再用 ipconfig
-    的输出兜底。ipconfig 中英文输出都含 "IPv4" 字样,取行内最后一个点分四段。
+    IP 枚举走双通道并集:gethostbyname_ex 走系统 DNS,在 Mihomo/Clash TUN
+    (fake-ip 劫持 hostname 解析)下会漏掉局域网 IP(2026-09-13 实测),所以再用
+    ipconfig 的输出兜底。ipconfig 中英文输出都含 "IPv4" 字样,取行内最后一个
+    点分四段。
     """
-    addrs = {"255.255.255.255"}
     ips = set()
     try:
         _, _, dns_ips = socket.gethostbyname_ex(socket.gethostname())
         # 2026-09-13 修复:IPv4 点分四段只有 **3** 个点。原来写 == 4,条件恒为
-        # 假 —— gethostbyname_ex 拿到的私网 IP 被全部丢弃,只剩 255.255.255.255,
-        # 多网卡时经常发错网口,设备收不到 beacon → 一直"与电脑断开/正在重连"。
+        # 假 —— gethostbyname_ex 拿到的私网 IP 被全部丢弃,只剩 255.255.255.255。
         ips.update(i for i in dns_ips if i.count(".") == 3)
     except Exception:
         pass
@@ -109,7 +106,18 @@ def _local_broadcast_addrs(port):
                     ips.add(found[-1])
         except Exception:
             pass
-    for ip in ips:
+    return ips
+
+
+def _local_broadcast_addrs(port):
+    """本机所有私网 IPv4 的定向广播 + 受限广播。
+
+    多网卡(网线+WiFi 同网段/代理 TUN)时,255.255.255.255 从哪个口出去由
+    系统路由决定,可能发错口导致设备收不到 beacon(实测踩过)。对每个私网
+    网段都发一份定向广播(x.y.z.255),哪个口能通走哪个。
+    """
+    addrs = {"255.255.255.255"}
+    for ip in _local_ip_addrs():
         parts = ip.split(".")
         if len(parts) != 4:
             continue
@@ -143,6 +151,11 @@ class UdpTransport:
         self._pair_token = str(pair_token or "").strip()
         self._token4 = self._fnv1a4(self._pair_token) if self._pair_token else None
         self._bogus_logged = 0
+        # 本机 IP 集合 + 是否已做"单设备隔离"(配了 device_ip 或 pair_token)。
+        # 用于冲突自检:未隔离时,收到其他电脑的 beacon = 可能抢同一台设备。
+        self._local_ips = _local_ip_addrs()
+        self._isolated = bool(self._device_ip or self._pair_token)
+        self._foreign_warn_ts = 0.0
         # 2026-09-13 修复:UDP 是无连接的,"设备静默 6s"并不意味着链路要拆。
         # 原来静默超时会让读线程退出 → 回调 on_disconnect → relay 收束整个会话
         # 并关闭 socket;而设备侧会自动重连,结果电脑端必须手重启(WINDOWS.md
@@ -209,9 +222,10 @@ class UdpTransport:
         if self._device is None:
             await self.disconnect()
             raise UdpError(
-                f"{self._device_wait_timeout:.0f}s 内没有收到设备报文:"
-                "设备未开机/未进入「AI语音」/不在同一局域网"
-                "(路由器 AP 隔离会挡住 beacon)")
+                f"{self._device_wait_timeout:.0f}s 内没有收到设备报文:设备未开机 / "
+                "未进入「AI语音」/ 不在同一局域网(路由器 AP 隔离会挡住 beacon)。\n"
+                "若同一局域网内有另一台电脑正在使用这台 AI Passport,它会先占住设备,"
+                "请先在那台电脑停止转发器再重试。")
         print(f"[udp] 发现设备 {self._device[0]}:{self._device[1]}")
 
     async def write_gatt_char(self, uuid, data):
@@ -322,6 +336,7 @@ class UdpTransport:
             now = time.monotonic()
             if now - last_refresh >= BEACON_REFRESH:
                 fresh = _local_broadcast_addrs(self._port)
+                self._local_ips = _local_ip_addrs()   # 切网后同步刷新(防误判回环)
                 if self._device_ip and (self._device_ip, self._port) not in fresh:
                     fresh.append((self._device_ip, self._port))
                 last_refresh = now
@@ -406,7 +421,8 @@ class UdpTransport:
         """读线程上下文: 按报文类型路由(事件/音频经 call_soon_threadsafe 进事件循环)。"""
         ftype = data[0]
         if ftype == T_BEACON:
-            return                       # 自己广播出去的回环
+            self._check_foreign_beacon(addr[0])   # 冲突自检(情况二)
+            return                                 # 自己广播出去的回环
         if ftype == T_PING:
             data = self._verify_and_strip(data, addr)
             if data is not None:
@@ -431,6 +447,27 @@ class UdpTransport:
                 print(f"[udp] 设备地址变化 {self._device} → {addr}",
                       file=sys.stderr)
             self._device = addr
+
+    def _check_foreign_beacon(self, src_ip):
+        """同局域网内其他电脑也在运行转发器 → 共用一台设备时会冲突,给出醒目标注。
+
+        仅在本实例未做"单设备隔离"(未配 device_ip / pair_token)时提醒——此时
+        任何另一台电脑的 beacon 都意味着可能抢同一台设备。已各自隔离(指定设备)
+        的场景不提醒,避免误报。限频 15s,不刷屏。
+        """
+        if self._isolated or src_ip in self._local_ips:
+            return                       # 已隔离 / 自己的回环,忽略
+        now = time.monotonic()
+        if now - self._foreign_warn_ts < 15:
+            return
+        self._foreign_warn_ts = now
+        print(
+            f"[udp] ⚠ 检测到同一局域网内另一台电脑({src_ip})也在运行语音转发器。\n"
+            f"      若两台电脑共用同一台 AI Passport,设备会在两台电脑之间来回切换"
+            f"(冲突),\n      导致按键文字跑到错误的电脑上。\n"
+            f"      处理办法:同一台 AI Passport 同一时间只在一台电脑上运行转发器;\n"
+            f"      要在另一台电脑用时,先停止这一台,再在另一台启动。",
+            file=sys.stderr)
 
     def _route_frame(self, ftype, payload):
         """事件循环线程: handler 齐备 → 分发;未齐 → 订阅前缓冲(有界)。"""

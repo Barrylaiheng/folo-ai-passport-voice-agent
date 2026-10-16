@@ -10,7 +10,7 @@ subprocess.run(
     check=True,
 )
 
-top = "AI-Passport-Voice-agent.8/"
+top = "AI-Passport-Voice-v0.3.8/"
 with zipfile.ZipFile(tree_zip) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
     for info in src.infolist():
         dst.writestr(top + info.filename, src.read(info))

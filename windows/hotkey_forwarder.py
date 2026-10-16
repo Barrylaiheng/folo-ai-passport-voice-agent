@@ -785,20 +785,6 @@ class Forwarder:
         # 终端/浏览器/被开发程序抢走), 找回目标必须以此为锚, 而非碰运气的前台。
         self._last_agent_hwnd = None
         self._last_agent_app = None
-        # 多机自动切换协调器(2026-10-16): 同局域网共享一台设备时,语音自动跟随
-        # 焦点所在的电脑。默认开启;关闭(auto_switch=False)则退回单台/手动模式。
-        self.auto_switch = bool(getattr(args, "auto_switch", False))
-        self.coord_port = int(getattr(args, "coord_port", 33334) or 33334)
-        self.coordinator = None
-        if self.auto_switch:
-            try:
-                from peer_coordinator import PeerCoordinator
-                self.coordinator = PeerCoordinator(coord_port=self.coord_port)
-                print(f"[coord] 多机自动切换已开启(协调端口 {self.coord_port});"
-                      f"语音将自动跟随焦点所在的 AI 工具")
-            except Exception as e:
-                print(f"[coord] 协调器启动失败,退回单台模式: {e}", file=sys.stderr)
-                self.coordinator = None
 
     def pc_status(self):
         return {"type": "pc.status", "audioReady": bool(self.sink and self.sink.enabled),
@@ -1021,9 +1007,6 @@ class Forwarder:
                 if app:
                     self._last_agent_hwnd = hwnd
                     self._last_agent_app = app
-                # 多机协调: 喂入本机前台是否落在已配置 AI 工具上(焦点优先切换)
-                if self.coordinator is not None:
-                    self.coordinator.update_local_focus(app is not None, title)
             except Exception:
                 pass  # 观察器永不因单次异常退出
 
@@ -1247,11 +1230,6 @@ class Forwarder:
         # 焦点观察器(2026-10-15 治本): 持续锚定"用户最近在用的 Agent 窗口",
         # 保证按键找回与"用户此刻在开发什么/焦点被谁抢"完全无关。
         asyncio.ensure_future(self._focus_watcher())
-        if self.coordinator is not None:
-            try:
-                self.coordinator.run()
-            except Exception as e:
-                print(f"[coord] 协调器运行失败: {e}", file=sys.stderr)
         while True:
             try:
                 transport = UdpTransport(port=self.args.port,
@@ -1286,9 +1264,6 @@ class Forwarder:
             try:
                 await transport.scan_for_device(None, None)
                 self._transport = transport
-                if self.coordinator is not None:
-                    transport.set_beacon_gate(
-                        lambda: self.coordinator.is_winner(self.active))
                 await transport.connect("udp://",
                                         on_disconnect=on_disconnect)
                 await transport.start_notify(EVENT_UUID, self.on_event)
@@ -1341,8 +1316,6 @@ class Forwarder:
                     await transport.disconnect()
                 except Exception:
                     pass
-                if self.coordinator is not None:
-                    self.coordinator.stop()
             await asyncio.sleep(0.5)
 
 
@@ -1461,8 +1434,6 @@ def main():
     default_apps = cfg.get("apps") or []
     default_send_key = str(cfg.get("send_key") or "enter")
     default_stop_on_release = bool(cfg.get("stop_on_release", True))
-    default_auto_switch = bool(cfg.get("auto_switch", True))   # 默认开启多机自动切换
-    default_coord_port = int(cfg.get("coord_port") or 33334)
 
     ap = argparse.ArgumentParser(
         description="AI Passport 热键+麦克风转发器(配置见 voice-config.json, "
@@ -1512,14 +1483,6 @@ def main():
     ap.add_argument("--stop-on-release", action="store_true",
                     default=default_stop_on_release,
                     help="松手时自动再注入一次语音键停录(推荐)")
-    ap.add_argument("--auto-switch", dest="auto_switch", action="store_true",
-                    default=default_auto_switch,
-                    help="开启多机自动切换(同局域网共享一台设备时,语音自动跟随焦点"
-                         "所在的电脑);默认开")
-    ap.add_argument("--no-auto-switch", dest="auto_switch", action="store_false",
-                    help="关闭多机自动切换(退回单台/手动模式)")
-    ap.add_argument("--coord-port", type=int, default=default_coord_port,
-                    help="多机自动切换协调端口(默认 33334,需防火墙放行)")
     ap.add_argument("--list-keys", action="store_true",
                     help="列出全部可用键名后退出")
     ap.add_argument("--list-devices", action="store_true",
@@ -1640,11 +1603,6 @@ def main():
     print("=" * 66)
     print(f"模式: {fwd.trigger_mode}  发送键: {fwd.send_key}  "
           f"音频: {'关闭' if args.no_audio else ('→ ' + fwd.sink.device_name if fwd.sink.enabled else '未就绪(装 VB-Cable 后重启本程序)')}")
-    if fwd.coordinator is not None:
-        print(f" [多机自动切换] 已开启(协调端口 {fwd.coord_port});"
-              f"语音自动跟随焦点所在电脑")
-    else:
-        print(" [多机自动切换] 未开启(单台/手动模式)")
     try:
         asyncio.run(fwd.run())
     except KeyboardInterrupt:

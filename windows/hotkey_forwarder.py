@@ -1633,52 +1633,99 @@ def kill_stale_instances(port=33333):
 def _maybe_start_vban(cfg):
     """多机场景: 自动拉起 VBAN 发送端, 把 Passport 声音推给其他电脑。
 
-    - 找 windows/vban/VBANServer/VBANServer.exe, 不存在 = 单机用户, 静默跳过;
-    - 已有 VBANServer.exe 在跑就不重复启动;
-    - 目标 IP 从 voice-config.json 的 "vban": {"target": "x.x.x.x", "port": 6980}
-      读取, target 为空 = 不推流(纯单机);
-    - 无控制台窗口(托盘/pythonw 模式), 子进程也用 CREATE_NO_WINDOW。
+    发送端优先用本项目自研 vban_sender.py —— 按 VBAN 协议正确拼包头,
+    修复第三方 VBANServer.exe 把 byte[6](声道数-1)错填 0xFF(=256 声道)
+    导致官方 VBAN Receptor 一选流就闪退的问题。
+
+    - 源码模式: 用 sys.executable 跑 vban_sender.py;
+    - 冻结模式: 复用主 exe 自派发(sys.executable --vban-sender), 免去单独解释器;
+    - 找不到 vban_sender.py 时, 回退旧 VBANServer.exe(有声道 bug, 仅兜底);
+    - 目标 IP 从 voice-config.json 的 "vban": {"target","port","samplerate","channels"}
+      读取, target 为空 = 不推流(纯单机); 无控制台窗口, 子进程也 CREATE_NO_WINDOW。
     """
     base = APP_DIR
-    exe = os.path.join(base, "vban", "VBANServer", "VBANServer.exe")
-    if not os.path.isfile(exe):
-        return None
-    try:
-        import subprocess
-        probe = subprocess.run(["tasklist", "/FI", "IMAGENAME eq VBANServer.exe"],
-                               capture_output=True, text=True,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if "VBANServer" in (probe.stdout or ""):
-            print("[vban] VBANServer 已在运行, 不重复启动")
-            return "already"
-    except Exception:
-        pass
     vban = cfg.get("vban") or {}
     target = str(vban.get("target") or "").strip()
     if not target:
-        print("[vban] 检测到 vban/VBANServer 但配置未填 vban.target, 跳过推流")
+        # 单机用户: 不要求必须存在发送端, 静默跳过
         return None
     port = str(vban.get("port") or 6980)
     samplerate = str(vban.get("samplerate") or 48000)
     channels = str(vban.get("channels") or 2)
-    try:
-        import subprocess
-        subprocess.Popen(
-            [exe, "--device", "CABLE", "--samplerate", samplerate,
-             "--channels", channels, "--target", target, "--port", port],
-            cwd=os.path.join(base, "vban", "VBANServer"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        print(f"[vban] 音频串流已启动: CABLE → {target}:{port} "
-              f"({samplerate}Hz/{channels}ch, 单机/其他电脑收流看 README 多机章节)")
-        return target
-    except Exception as e:
-        print(f"[vban] VBANServer 启动失败({e}); 仅影响多机音频, 不影响本机")
-        return None
+
+    import subprocess
+    frozen = getattr(sys, "frozen", False)
+
+    # 1) 优先自研发送端(修复 255 声道字节 bug)
+    sender_script = os.path.join(base, "vban_sender.py")
+    if os.path.isfile(sender_script):
+        if frozen:
+            cmd = [sys.executable, "--vban-sender",
+                   "--target", target, "--port", port,
+                   "--samplerate", samplerate, "--channels", channels]
+        else:
+            cmd = [sys.executable, sender_script,
+                   "--target", target, "--port", port,
+                   "--samplerate", samplerate, "--channels", channels]
+        try:
+            subprocess.Popen(cmd, cwd=base,
+                             stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            print(f"[vban] 音频串流已启动(自研发送端): CABLE → {target}:{port} "
+                  f"({samplerate}Hz/{channels}ch, 修复声道字节)")
+            return target
+        except Exception as e:
+            print(f"[vban] 自研发送端启动失败({e}); 尝试回退 VBANServer.exe")
+
+    # 2) 旧 VBANServer.exe 兜底(有声道字节 bug, 仅当无自研发送端时)
+    exe = os.path.join(base, "vban", "VBANServer", "VBANServer.exe")
+    if os.path.isfile(exe):
+        try:
+            probe = subprocess.run(["tasklist", "/FI", "IMAGENAME eq VBANServer.exe"],
+                                   capture_output=True, text=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if "VBANServer" in (probe.stdout or ""):
+                print("[vban] VBANServer 已在运行, 不重复启动")
+                return "already"
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(
+                [exe, "--device", "CABLE", "--samplerate", samplerate,
+                 "--channels", channels, "--target", target, "--port", port],
+                cwd=os.path.join(base, "vban", "VBANServer"),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            print(f"[vban] 音频串流已启动(旧VBANServer兜底): CABLE → {target}:{port}")
+            return target
+        except Exception as e:
+            print(f"[vban] VBANServer 启动失败({e}); 仅影响多机音频, 不影响本机")
+            return None
+    print("[vban] 未找到任何发送端(vban_sender.py / VBANServer.exe), 跳过推流")
+    return None
 
 
 def main():
+    # 自派发: 冻结 exe 以 --vban-sender 复用自身运行 VBAN 发送端子进程,
+    # 免去单独解释器/打包 python 的复杂度(详见 _maybe_start_vban)
+    if "--vban-sender" in sys.argv:
+        sys.argv.remove("--vban-sender")
+        try:
+            import vban_sender
+            vban_sender.main()
+        except Exception:
+            import traceback
+            try:
+                with open(os.path.join(APP_DIR, "vban_sender.log"), "a",
+                          encoding="utf-8") as _f:
+                    _f.write(traceback.format_exc() + "\n")
+            except Exception:
+                pass
+        return
+
     # pythonw 静默运行(托盘模式)时 stdout/stderr 为 None, 后面任何 print
     # 都会崩, 先兜底重定向; 日志稍后统一切到 forwarder.log
     if sys.stdout is None:

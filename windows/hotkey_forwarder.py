@@ -1630,6 +1630,29 @@ def kill_stale_instances(port=33333):
         kernel32.CloseHandle(h)
 
 
+# VBAN 推流实时状态(托盘菜单读取): target=目标地址, ok=发送端是否已拉起,
+# proc=Popen 句柄(存活检测), mode=自研/兜底
+_VBAN_STATE = {"target": None, "ok": False, "proc": None, "mode": ""}
+
+
+def _vban_status_line():
+    """托盘用: 一行 VBAN 推流状态(未配置=不显示)。"""
+    st = _VBAN_STATE
+    if not st["target"]:
+        return None
+    alive = False
+    proc = st.get("proc")
+    if proc is not None:
+        try:
+            alive = proc.poll() is None
+        except Exception:
+            alive = False
+    if not st["ok"]:
+        return f"音频串流: 未启动 ({st['target']})"
+    tag = st.get("mode") or "发送端"
+    return f"音频串流: {'推送中' if alive else '已停止'} → {st['target']} ({tag})"
+
+
 def _maybe_start_vban(cfg):
     """多机场景: 自动拉起 VBAN 发送端, 把 Passport 声音推给其他电脑。
 
@@ -1648,7 +1671,9 @@ def _maybe_start_vban(cfg):
     target = str(vban.get("target") or "").strip()
     if not target:
         # 单机用户: 不要求必须存在发送端, 静默跳过
+        _VBAN_STATE.update(target=None, ok=False, proc=None, mode="")
         return None
+    _VBAN_STATE["target"] = target
     port = str(vban.get("port") or 6980)
     samplerate = str(vban.get("samplerate") or 48000)
     channels = str(vban.get("channels") or 2)
@@ -1658,21 +1683,24 @@ def _maybe_start_vban(cfg):
 
     # 1) 优先自研发送端(修复 255 声道字节 bug)
     sender_script = os.path.join(base, "vban_sender.py")
-    if os.path.isfile(sender_script):
-        if frozen:
-            cmd = [sys.executable, "--vban-sender",
-                   "--target", target, "--port", port,
-                   "--samplerate", samplerate, "--channels", channels]
-        else:
-            cmd = [sys.executable, sender_script,
-                   "--target", target, "--port", port,
-                   "--samplerate", samplerate, "--channels", channels]
+    if frozen:
+        # 冻结 exe: vban_sender 已随 hiddenimports 打进包里, 用 --vban-sender
+        # 自派发即可 —— 不要求磁盘上有 vban_sender.py(onedir 里没有这个 .py,
+        # 之前按文件判断导致打包版永远"未找到发送端, 跳过推流", 2026-10-26 修复)
+        cmd = [sys.executable, "--vban-sender",
+               "--target", target, "--port", port,
+               "--samplerate", samplerate, "--channels", channels]
+    elif os.path.isfile(sender_script):
+        cmd = [sys.executable, sender_script,
+               "--target", target, "--port", port,
+               "--samplerate", samplerate, "--channels", channels]
         try:
-            subprocess.Popen(cmd, cwd=base,
+            proc = subprocess.Popen(cmd, cwd=base,
                              stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _VBAN_STATE.update(ok=True, proc=proc, mode="自研发送端")
             print(f"[vban] 音频串流已启动(自研发送端): CABLE → {target}:{port} "
                   f"({samplerate}Hz/{channels}ch, 修复声道字节)")
             return target
@@ -1688,17 +1716,19 @@ def _maybe_start_vban(cfg):
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if "VBANServer" in (probe.stdout or ""):
                 print("[vban] VBANServer 已在运行, 不重复启动")
+                _VBAN_STATE.update(ok=True, proc=None, mode="旧VBANServer(已在运行)")
                 return "already"
         except Exception:
             pass
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [exe, "--device", "CABLE", "--samplerate", samplerate,
                  "--channels", channels, "--target", target, "--port", port],
                 cwd=os.path.join(base, "vban", "VBANServer"),
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _VBAN_STATE.update(ok=True, proc=proc, mode="旧VBANServer兜底")
             print(f"[vban] 音频串流已启动(旧VBANServer兜底): CABLE → {target}:{port}")
             return target
         except Exception as e:
@@ -1928,22 +1958,34 @@ def main():
     print("=" * 66)
     print(f"模式: {fwd.trigger_mode}  发送键: {fwd.send_key}  "
           f"音频: {'关闭' if args.no_audio else ('→ ' + fwd.sink.device_name if fwd.sink.enabled else '未就绪(装 VB-Cable 后重启本程序)')}")
-    # 系统托盘(可选): 右下角常驻图标, 显示运行状态, 菜单 = 日志/退出
+    # 系统托盘(可选): 右下角常驻图标, 显示运行状态, 菜单 = 状态/日志/退出
     _t0 = time.time()
 
     def _tray_status():
+        """返回实时状态行(list[str]), 托盘菜单逐行显示, 第一行进 tooltip。"""
+        lines = []
         try:
             age = time.time() - getattr(fwd, "_last_hello_at", -1e9)
             if age < 0:
-                dev = "等待设备…"
+                lines.append("设备: 等待连接…")
             elif age < 10:
-                dev = "设备在线"
+                lines.append("设备: 在线 ✓")
             else:
-                dev = "设备未连接"
-            mins = int((time.time() - _t0) // 60)
-            return f"{dev} · 已运行 {mins} 分钟"
+                lines.append("设备: 未连接 ✗")
         except Exception:
-            return "运行中"
+            pass
+        try:
+            vline = _vban_status_line()
+            if vline:
+                lines.append(vline)
+        except Exception:
+            pass
+        try:
+            mins = int((time.time() - _t0) // 60)
+            lines.append(f"已运行 {mins} 分钟 · 模式 {fwd.trigger_mode}")
+        except Exception:
+            pass
+        return lines or ["运行中"]
 
     try:
         from tray_icon import start_tray
@@ -1956,8 +1998,18 @@ def main():
             os._exit(0)  # 转发器无状态(UDP+注入线程), 停注入器后硬退出
 
         _ico = os.path.join(APP_DIR, "passport-voice.ico")
+        if not os.path.isfile(_ico) and getattr(sys, "frozen", False):
+            # onedir 模式 datas 打进 _internal/, APP_DIR(=exe 目录)里没有;
+            # sys._MEIPASS 在 onedir 下指向 _internal, 兜底找一遍
+            _cand = os.path.join(getattr(sys, "_MEIPASS", ""),
+                                 "passport-voice.ico")
+            if _cand and os.path.isfile(_cand):
+                _ico = _cand
         if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
-                      status_fn=_tray_status):
+                      status_fn=_tray_status,
+                      balloon=("AI 护照语音已启动",
+                               "长按设备 UP 键说话, 文字自动进当前窗口。"
+                               "右键托盘图标可看状态/打开日志/退出。")):
             print("[tray] 托盘图标已启动: 右下角可看运行状态/打开日志/退出")
         else:
             print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")

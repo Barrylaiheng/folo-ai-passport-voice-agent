@@ -1514,19 +1514,33 @@ class Forwarder:
 def load_local_config():
     """Portable config beside the executable/source; never needs the ASR GUI.
 
-    Keep legacy config.local.json as a fallback for existing source users.
-    Release packaging excludes both user configuration files.
+    加载优先级(确保「即插即用、零配置」):
+      voice-config.json  >  config.local.json  >  voice-config.example.json(出厂默认)
+    前两者被 .gitignore 忽略(用户私有), 发布包只含 example; 若用户未放真配置,
+    自动回退 example 让程序开箱即用, 而非空配置空跑。
     """
     base = os.path.dirname(sys.executable if getattr(sys, "frozen", False)
                            else os.path.abspath(__file__))
-    path = os.path.join(base, "voice-config.json")
-    if not os.path.isfile(path):
-        path = os.path.join(base, "config.local.json")
+    candidates = ["voice-config.json", "config.local.json", "voice-config.example.json"]
+    used = None
+    for name in candidates:
+        p = os.path.join(base, name)
+        if os.path.isfile(p):
+            used = p
+            break
+    if used is None:
+        print("[config] 未找到任何配置文件(含出厂 example), 程序将以空配置运行; "
+              "如需自定义请复制 voice-config.example.json 为 voice-config.json")
+        return {}
     try:
-        with open(path, encoding="utf-8-sig") as f:
+        with open(used, encoding="utf-8-sig") as f:
             cfg = json.load(f)
+        if os.path.basename(used) == "voice-config.example.json":
+            print("[config] 未找到 voice-config.json, 已回退使用出厂默认配置(example); "
+                  "如需自定义请另存为 voice-config.json 后修改")
         return cfg if isinstance(cfg, dict) else {}
-    except Exception:
+    except Exception as e:
+        print(f"[config] 读取 {used} 失败: {e}, 回退空配置")
         return {}
 
 

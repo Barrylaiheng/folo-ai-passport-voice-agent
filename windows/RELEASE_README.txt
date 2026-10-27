@@ -1,0 +1,26 @@
+AI Passport 随身语音 · Agent 模式  v0.4.0
+========================================
+
+把 FoloToy AI Passport（巴掌大的语音小钥匙）变成 WorkBuddy / Trae 等 AI 应用的无线语音键：
+按住设备上键说话 → 松开自动转写进聊天框 → 短按下键发送。
+
+【三步上手】
+1. 装好 VB-CABLE 虚拟声卡（官网 vb-audio.com/Cable，装完重启一次电脑）。
+2. 双击本目录的 AI-Passport-Voice-v0.4.0.exe —— 无窗口，右下角出现托盘图标即成功。
+3. 设备打开「AI语音」→ 点进 AI 应用聊天框 → 按住上键说话 → 松开出字 → 下键发送。
+
+【配置（可选，已带出厂默认，开箱即用）】
+编辑同目录的 voice-config.json：
+- apps：要接入的 AI 应用及其语音快捷键（默认 WorkBuddy / Trae CN）。
+- vban.target：填另一台电脑 IP，把声音用 VBAN 推过去（留空 = 单机，零影响）。
+- cross_trigger.target：填另一台电脑 IP，按键 UDP 直通到那台本地注入 Ctrl+D（留空 = 本机注入）。
+
+【本版本 v0.4.0 要点】
+- 跨机按键 UDP 直通：替代 DeskFlow，按键直发另一台电脑本地注入，不再"时灵时不灵"。
+- 自研 VBAN 发送端：不再依赖外部 VBANServer.exe，打包版也能稳定推流。
+- 系统托盘 v2：图标回到产品 VI，右键看运行状态，提示实时刷新。
+完整更新见仓库 CHANGELOG.md；教程与排错见 README.md / docs/。
+
+【排错】
+托盘菜单 → 打开日志 看 forwarder.log。安全软件（尤其火绒）可能把全局键盘钩子进程当键盘记录器周期强杀，
+请把本目录加入信任区 / 排除项。

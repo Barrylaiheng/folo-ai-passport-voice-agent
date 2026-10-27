@@ -25,7 +25,7 @@ def forwarder_alive():
     """A 机转发器进程是否在跑(兼容打包 exe 与源码 python 两种形态)。"""
     try:
         out = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq AI-Passport-Voice-v0.3.8.exe"],
+            ["tasklist", "/FI", "IMAGENAME eq AI-Passport-Voice-v0.4.0.exe"],
             capture_output=True, text=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
         if "AI-Passport" in out:

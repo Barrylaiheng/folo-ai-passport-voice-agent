@@ -1,35 +1,28 @@
-# Build the release zip: git-archive tree + freshly built EXE.
+# 构建发布 zip: 干净最小包(不含整源码树)。
+# 只含: 构建好的 exe + 出厂默认 voice-config.json + 托盘图标 + 简短 README。
+# 顶层目录与 exe 名自动取自传入的 exe 路径, 不再硬编码版本。
 # Usage: python make_release_zip.py <repo> <exe_path> <out_zip>
-import subprocess, sys, zipfile
+import sys, zipfile
 from pathlib import Path
 
 repo, exe, out = (Path(sys.argv[i]).resolve() for i in (1, 2, 3))
-tree_zip = out.with_suffix(".tree.zip")
-subprocess.run(
-    ["git", "-C", str(repo), "archive", "--format=zip", "-o", str(tree_zip), "HEAD"],
-    check=True,
-)
-
-top = "AI-Passport-Voice-v0.3.8/"
-with zipfile.ZipFile(tree_zip) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
-    written = set()
-    for info in src.infolist():
-        dst.writestr(top + info.filename, src.read(info))
-        written.add(top + info.filename)
-    dst.write(exe, top + "windows/" + exe.name)
-    # 托盘图标随包: 缺它托盘就退化成系统默认白框(2026-10-26 用户反馈)
-    # git 树已提交 ico 时不重复写(避免 zip 内同名双条目)
-    ico = repo / "windows" / "passport-voice.ico"
-    ico_name = top + "windows/passport-voice.ico"
-    if ico.is_file() and ico_name not in written:
-        dst.write(str(ico), ico_name)
-        print("已写入托盘图标 passport-voice.ico")
-    elif ico_name in written:
-        print("托盘图标已随 git 树打进 zip, 不重复写")
-    # 出厂默认配置: 把 example 复制为 voice-config.json 一起发布, 保证开箱即用(零配置)
+top = exe.stem + "/"  # e.g. AI-Passport-Voice-v0.4.0/
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+    # 1) 主程序(与配置/图标同目录, tray_icon/配置按 exe 目录加载)
+    dst.write(exe, top + exe.name)
+    # 2) 出厂默认配置: example 复制为 voice-config.json, 开箱即用零配置
     example_cfg = repo / "windows" / "voice-config.example.json"
     if example_cfg.is_file():
-        dst.write(str(example_cfg), top + "windows/voice-config.json")
-        print("已写入出厂默认 voice-config.json (来自 example)")
-tree_zip.unlink()
+        dst.write(example_cfg, top + "voice-config.json")
+        print("已写入出厂默认 voice-config.json")
+    # 3) 托盘图标(缺它托盘退化成系统默认白框)
+    ico = repo / "windows" / "passport-voice.ico"
+    if ico.is_file():
+        dst.write(ico, top + "passport-voice.ico")
+        print("已写入托盘图标 passport-voice.ico")
+    # 4) 简短发布说明(替代整源码树)
+    readme = repo / "windows" / "RELEASE_README.txt"
+    if readme.is_file():
+        dst.write(readme, top + "README.txt")
+        print("已写入 README.txt")
 print("OK:", out)

@@ -82,13 +82,26 @@ Agent 模式的核心能力（这也是本项目的架构卖点）：
 
 > WorkBuddy 5.8.3+ 不用改：转发器按 exe 版本自动注 Alt 长按。如果你**在应用里手动改过**语音热键，给该应用加 `"voice_key_rules": []` 锁定 `voice_key`，或用 `"voice_key_rules": [{"since":"x.y.z","key":"..."}]` 自定义版本规则。
 >
-> 另有可选字段 `"vban": {"target": "局域网内另一台电脑的IP", "port": 6980}`：把 Passport 声音用 VBAN 协议推给局域网内另一台电脑（需在该目录放置 `vban/VBANServer/VBANServer.exe`）。未配置时自动跳过，单机使用零影响。
+> 另有可选字段 `"vban": {"target": "局域网内另一台电脑的IP", "port": 6980}`：把 Passport 声音用 VBAN 协议推给局域网内另一台电脑。转发器**自带 VBAN 发送端，无需外部 exe**；`target` 留空或工具不可用会自动跳过，单机使用零影响。
 
 ### 接入新的 AI 应用（比如 Cursor）
 
 1. 在目标应用里找到它"开始/停止语音输入"的快捷键
 2. 在 `apps` 里加一条：`{"title_contains": "应用窗口标题关键词", "exe_contains": "进程名关键词", "voice_key": "它的快捷键"}`
 3. 重启转发器即可。应用识别优先匹配前台窗口标题或进程名（不区分大小写）。
+
+## 两台电脑联动（可选）：跨机按键 UDP 直通
+
+如果你和作者一样有**两台电脑共用一台 Passport**，想在没接设备的那台（B 机）也能用语音键：
+
+- **旧方案的坑**：用 DeskFlow 跨屏转发按键，但它只转发按键、不转发设备音频，且服务端钩子分不清"软件注入键"和"真人键"，光标脱节时常"时灵时不灵"——按下设备键，B 机没反应。
+- **新方案（v0.4.0 起）**：A 机（接设备）转发器配置 `"cross_trigger": {"target": "B机IP", "port": 33334}`，按键事件直接 UDP 发往 B 机；B 机跑 `btrigger_daemon.py`（`python btrigger_daemon.py --install-startup` 装自启），收到后在**前台是 WorkBuddy** 时本地注入 `Ctrl+D`。
+  - 默认 `cross_trigger.target` 留空 = 本机注入（单机用户零感知）。
+  - B 机需放行 UDP 33334 入站；助手只在"前台窗口是 WorkBuddy"时注入（联调前先把 WorkBuddy 点成最前面）。
+  - 想退回？把 `cross_trigger.target` 清空即恢复本机注入，DeskFlow 仅作应急回退。
+- 音频跨机不变：仍走 VBAN（见上一段 `vban.target`）。按键跨机走 UDP 直通，两条链路解耦。
+
+详细部署与取证见仓库 docs 与《两机联调事件簿》。
 
 ## 按键说明（设备端）
 
@@ -118,7 +131,9 @@ Agent 模式的核心能力（这也是本项目的架构卖点）：
 - 新增通用 Agent 模式（`apps` 配置、多应用自动切换、焦点观察器、确定性窗口找回、UIA 输入框焦点恢复）
 - 新增 Trae CDP 直连通道（可选，严格页面校验防止误连其他 Chromium 程序）
 - 语音热键**版本自适应**：WorkBuddy 5.8.3+ 自动改注单独 Alt，并适配其"长按说话、松开停录"手势（旧版仍为 Ctrl+D 点按）
-- 新增**系统托盘**：日常双击启动后常驻右下角，托盘菜单可打开日志、干净退出（纯 ctypes，零额外依赖）
+- 新增**系统托盘**（已升级到 v2）：日常双击启动后常驻右下角，图标回到产品 VI，tooltip 实时状态、右键看运行状态，菜单可打开日志、干净退出（纯 ctypes，零额外依赖）
+- 新增**跨机按键 UDP 直通**（替代 DeskFlow 跨屏转发）：按键直发另一台电脑本地注入，`btrigger_daemon.py` 做来源 / 令牌 / 前台校验
+- 新增**自研 VBAN 发送端**：不再依赖外部 VBANServer.exe，打包版也能稳定推流
 - 修复键盘回退路径在"窗口切回但输入框失焦"场景下快捷键被忽略的问题
 - 补齐 Python 依赖清单（pywinauto / websockets）
 

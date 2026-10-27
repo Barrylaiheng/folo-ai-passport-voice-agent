@@ -1232,12 +1232,16 @@ class Forwarder:
         "用户最近在用的 Agent"确定性找回, 与抢焦点者是谁无关。
 
         直通模式(2026-10-27): 配置 cross_trigger.target 后, 事件直通 B 机助手
-        本地注入, 本地完全不注入 —— 上面的"前台判定/找回窗口"都在 B 机做。
+        本地注入, 本地完全不注入 —— 前台判定由 B 机助手把关。
+        ⚠️部署纪律(2026-10-27 实证): 直通启用后 B 机助手必须在跑, 否则两边
+        全哑。出厂/默认配置 target 必须留空(本地注入), 只在 B 机助手部署好
+        后才打开。不做"双通道并发": B 机前台常态就是 WorkBuddy, 并发会双机
+        同时录音答题。
         """
         if self.cross is not None:
             phase = "stop" if ("停止" in action or "松开" in action) else "start"
-            self.cross.send({"event": "voice_key", "phase": phase})
-            print(f"[cross] 语音键直通 → {phase} (B 机注入)")
+            ok = self.cross.send({"event": "voice_key", "phase": phase})
+            print(f"[cross] 语音键直通 → {phase} ({'已发' if ok else '发送失败'})")
             return
         # 长按型语音键(WorkBuddy 5.8.3 "长按 Alt"): 停录=抬起即可, 无需找回
         # 窗口 —— 抬键是全局键盘状态, 与前台是谁无关, 抢先处理避免多余动作。

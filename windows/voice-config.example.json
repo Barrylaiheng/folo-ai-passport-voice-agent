@@ -15,5 +15,10 @@
     "port": 6980,
     "samplerate": 48000,
     "channels": 2
+  },
+  "cross_trigger": {
+    "target": "",
+    "port": 33334,
+    "token": ""
   }
 }

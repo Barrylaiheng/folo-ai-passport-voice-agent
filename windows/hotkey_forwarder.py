@@ -27,6 +27,7 @@ import ctypes
 import json
 import os
 import queue
+import socket
 import sys
 import threading
 import time
@@ -820,6 +821,53 @@ def switch_to_window(hwnd):
     return user32.GetForegroundWindow() == hwnd
 
 
+# ---------------------------------------------------------------------------
+# 跨机直通触发(A↔B 通道, 2026-10-27 联调事件簿 §11.3)
+# 报文 = [0x21][UTF-8 JSON 行][4B FNV-1a 令牌尾], 契约与 udp_transport 的设备
+# 通道同构; 端口 33334 独立于设备通道(33333)与 VBAN(6980)。B 机侧解析器见
+# btrigger_daemon.py —— 改一侧必须同步另一侧。
+# ---------------------------------------------------------------------------
+
+CROSS_EVT_TYPE = 0x21
+CROSS_TRIGGER_PORT = 33334
+
+
+def _fnv1a4(token):
+    """令牌字符串 → 4 字节校验尾(FNV-1a 32bit, 与 udp_transport 同构)。"""
+    h = 0x811C9DC5
+    for ch in str(token).encode("utf-8"):
+        h ^= ch
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h.to_bytes(4, "little")
+
+
+class CrossTriggerSender:
+    """把触发事件直通给 B 机助手(纯 UDP, 发后即忘; 失败静默限频告警)。"""
+
+    def __init__(self, target, port, token=""):
+        self.target = str(target).strip()
+        self.port = int(port) if port else CROSS_TRIGGER_PORT
+        self._tail = _fnv1a4(token) if str(token or "").strip() else b""
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._fail_ts = 0.0
+
+    def send(self, event):
+        """event: dict(如 {"event":"voice_key","phase":"start"})。"""
+        try:
+            pkt = (bytes((CROSS_EVT_TYPE,))
+                   + json.dumps(event, separators=(",", ":")).encode("utf-8")
+                   + self._tail)
+            self._sock.sendto(pkt, (self.target, self.port))
+            return True
+        except OSError as e:
+            now = time.monotonic()
+            if now - self._fail_ts > 30:
+                self._fail_ts = now
+                print(f"[cross] 直通发送失败({self.target}:{self.port}): {e}",
+                      file=sys.stderr)
+            return False
+
+
 class Forwarder:
     def __init__(self, args):
         self.args = args
@@ -828,6 +876,21 @@ class Forwarder:
         self.apps = list(getattr(args, "apps", None) or [])
         self.send_key = str(getattr(args, "send_key", "enter") or "enter")
         self.stop_on_release = bool(getattr(args, "stop_on_release", True))
+        # 跨机直通触发(2026-10-27, 联调事件簿 §11.3 根治方向): 双机场景下
+        # 原路径 = 本地注入 Ctrl+D → DeskFlow 按光标转发, 光标状态/焦点脱节时
+        # Passport 触发失灵(2026-10-27 下午 B 机实测)。配置 cross_trigger.target
+        # 后改为 UDP 直通: 触发事件发 B 机助手(btrigger_daemon.py)本地注入,
+        # 按键路径与光标所在屏幕彻底解耦; 音频链路(VBAN)不变。
+        xt = getattr(args, "cross_trigger", None) or {}
+        self.cross = None
+        if str((xt or {}).get("target") or "").strip():
+            self.cross = CrossTriggerSender(
+                xt.get("target"),
+                xt.get("port") or CROSS_TRIGGER_PORT,
+                xt.get("token") or "")
+            print(f"[cross] 跨机直通已启用: 触发事件 → "
+                  f"{self.cross.target}:{self.cross.port} "
+                  f"(B 机助手注入, 本地不再注入语音键/回车)")
         # 跨网模式(2026-10-14): 穿透隧道公网地址(host:port) + 配对令牌。
         # remote_endpoint 非空时, device.hello 后自动推送 cfg.udp 存进设备 NVS。
         self.remote_endpoint = str(getattr(args, "remote_endpoint", "") or "").strip()
@@ -1167,7 +1230,15 @@ class Forwarder:
         目标判定(2026-10-15 治本): 前台是 Agent → 直接注(用户焦点本来就在,
         不动它); 前台被抢(用户在开发任何东西时都会发生) → 焦点观察器锚定
         "用户最近在用的 Agent"确定性找回, 与抢焦点者是谁无关。
+
+        直通模式(2026-10-27): 配置 cross_trigger.target 后, 事件直通 B 机助手
+        本地注入, 本地完全不注入 —— 上面的"前台判定/找回窗口"都在 B 机做。
         """
+        if self.cross is not None:
+            phase = "stop" if ("停止" in action or "松开" in action) else "start"
+            self.cross.send({"event": "voice_key", "phase": phase})
+            print(f"[cross] 语音键直通 → {phase} (B 机注入)")
+            return
         # 长按型语音键(WorkBuddy 5.8.3 "长按 Alt"): 停录=抬起即可, 无需找回
         # 窗口 —— 抬键是全局键盘状态, 与前台是谁无关, 抢先处理避免多余动作。
         if getattr(self, "_vk_held", None) and ("停止" in action or "松开" in action):
@@ -1344,6 +1415,10 @@ class Forwarder:
                 return
             self.last_enter_at = now
             if self.trigger_mode == "mic":
+                if self.cross is not None:
+                    self.cross.send({"event": "enter"})
+                    print("[cross] 回车直通 (B 机注入)")
+                    return
                 # 治本(2026-10-15): DOWN 发送也必须确定性对准 Agent —— 前台
                 # 被抢(用户在开发别的东西)时, 先找回用户最近在用的 Agent 再
                 # 发回车, 避免回车打进无关窗口。
@@ -1828,6 +1903,9 @@ def main():
     ap.add_argument("--diagnose", action="store_true",
                     help="检查依赖、声卡与端口，不模拟按键、不录音")
     args = ap.parse_args()
+    # 跨机直通配置(事件簿 §11.3): 仅配置文件提供, 不设命令行入口(做减法)。
+    # {"target": "192.168.110.209", "port": 33334, "token": ""} → target 非空启用。
+    args.cross_trigger = cfg.get("cross_trigger") or {}
 
     if args.diagnose:
         from diagnose_voice import main as diagnose

@@ -25,4 +25,19 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
     if readme.is_file():
         dst.write(readme, top + "README.txt")
         print("已写入 README.txt")
+    # 5) PyInstaller onedir 运行时: 整个 _internal 目录(python311.dll + 全部 .pyd/依赖)。
+    #    onedir 模式下 exe 只是引导器, 真解释器与依赖全在 _internal; 漏打会导致
+    #    "Failed to load Python DLL ... _internal\python311.dll 找不到指定的模块"。
+    #    (2026-10-28 事故: 上一版只打 4 文件, 用户下载解压后双击直接报此错)
+    internal = exe.parent / "_internal"
+    if internal.is_dir():
+        n = 0
+        for p in internal.rglob("*"):
+            if p.is_file():
+                arc = top + p.relative_to(exe.parent).as_posix()
+                dst.write(p, arc)
+                n += 1
+        print(f"已写入 _internal 运行时({n} 个文件)")
+    else:
+        print("⚠️ 未找到 _internal 目录, 请先构建 onedir 产物再打 zip")
 print("OK:", out)

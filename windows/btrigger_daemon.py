@@ -118,29 +118,20 @@ def resolve_key_spec(spec):
 
 
 def _send_key(vk, scan, extended, up):
-    """扫描码事件注入(与 hotkey_forwarder._send_key 同款, 最接近真实键盘)。"""
-    class _KINPUT(ctypes.Structure):
-        _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                    ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+    """VK 方式注入(2026-10-28 v0.4.2, 联调事件簿 §14 定案)。
 
-    class _INPUT(ctypes.Structure):
-        class _U(ctypes.Union):
-            _fields_ = [("ki", _KINPUT)]
-        _anonymous_ = ("u",)
-        _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
-
-    KEYEVENTF_SCANCODE = 0x0008
-    KEYEVENTF_EXTENDEDKEY = 0x0001
+    旧版用 SendInput+KEYEVENTF_SCANCODE(扫描码, 最接近真实键盘)——B 机
+    实证 17:12 三对注入全部到达但 WorkBuddy 录音键不激活; 同机打补丁改
+    keybd_event(VK 方式)后立即可用。WorkBuddy 的热键处理对扫描码注入
+    不敏感(疑似按 VK/低级钩子过滤), 故本助手固定 keybd_event。
+    注意: A 机 hotkey_forwarder 自身注入不动(本机直注路径实证可用)。
+    """
     KEYEVENTF_KEYUP = 0x0002
-    flags = KEYEVENTF_SCANCODE
-    if extended:
-        flags |= KEYEVENTF_EXTENDEDKEY
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    flags = KEYEVENTF_EXTENDEDKEY if extended else 0
     if up:
         flags |= KEYEVENTF_KEYUP
-    ki = _KINPUT(0, scan, flags, 0, None)
-    inp = _INPUT(1, _INPUT._U(ki=ki))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+    ctypes.windll.user32.keybd_event(vk, scan, flags, 0)
 
 
 def tap_key(spec, action=""):

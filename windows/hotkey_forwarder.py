@@ -2078,6 +2078,42 @@ def main():
             pass
         return lines or ["运行中"]
 
+    # 系统托盘(可选): 结构化菜单(P1) = 状态三段 + 配置/扫描动作 + 可配对 B 机列表
+    try:
+        from tray_icon import start_tray
+
+        def _on_tray_quit():
+            try:
+                fwd.injector.stop()
+            except Exception:
+                pass
+            os._exit(0)  # 转发器无状态(UDP+注入线程), 停注入器后硬退出
+
+        _ico = os.path.join(APP_DIR, "passport-voice.ico")
+        if not os.path.isfile(_ico) and getattr(sys, "frozen", False):
+            # onedir 模式 datas 打进 _internal/, APP_DIR(=exe 目录)里没有;
+            # sys._MEIPASS 在 onedir 下指向 _internal, 兜底找一遍
+            _cand = os.path.join(getattr(sys, "_MEIPASS", ""),
+                                 "passport-voice.ico")
+            if _cand and os.path.isfile(_cand):
+                _ico = _cand
+        if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
+                      menu_fn=_tray_menu,
+                      callbacks={"cfg": _on_cfg, "scan": _on_scan, "pair": _pair_with},
+                      balloon=("AI 护照语音已启动",
+                               "长按设备 UP 键说话, 文字自动进当前窗口。"
+                               "右键托盘图标可看状态/配对/打开日志/退出。")):
+            print("[tray] 托盘图标已启动: 右下角可看运行状态/配对B机/打开日志/退出")
+        else:
+            print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")
+    except Exception as _tray_err:
+        print(f"[tray] 托盘启动失败({_tray_err}), 继续无托盘运行")
+    try:
+        asyncio.run(fwd.run())
+    except KeyboardInterrupt:
+        print("\n退出")
+        fwd.injector.stop()
+
 
 # ---------- 跨机自动发现 / 配对(P1) ----------
 BEACON_EVT_TYPE = 0x22   # 与 btrigger_daemon 广播 beacon 同型
@@ -2169,6 +2205,7 @@ def _pair_with(idx):
 
 def _tray_menu():
     """结构化托盘菜单(状态三段 + 动作 + 配对列表)。"""
+    from tray_icon import IDM_CFG, IDM_SCAN
     status = []
     try:
         age = time.time() - getattr(fwd, "_last_hello_at", -1e9)
@@ -2202,41 +2239,6 @@ def _tray_menu():
     except Exception:
         pass
     return {"status": status, "actions": actions, "pairs": pairs}
-
-    try:
-        from tray_icon import start_tray, IDM_CFG, IDM_SCAN
-
-        def _on_tray_quit():
-            try:
-                fwd.injector.stop()
-            except Exception:
-                pass
-            os._exit(0)  # 转发器无状态(UDP+注入线程), 停注入器后硬退出
-
-        _ico = os.path.join(APP_DIR, "passport-voice.ico")
-        if not os.path.isfile(_ico) and getattr(sys, "frozen", False):
-            # onedir 模式 datas 打进 _internal/, APP_DIR(=exe 目录)里没有;
-            # sys._MEIPASS 在 onedir 下指向 _internal, 兜底找一遍
-            _cand = os.path.join(getattr(sys, "_MEIPASS", ""),
-                                 "passport-voice.ico")
-            if _cand and os.path.isfile(_cand):
-                _ico = _cand
-        if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
-                      menu_fn=_tray_menu,
-                      callbacks={"cfg": _on_cfg, "scan": _on_scan, "pair": _pair_with},
-                      balloon=("AI 护照语音已启动",
-                               "长按设备 UP 键说话, 文字自动进当前窗口。"
-                               "右键托盘图标可看状态/配对/打开日志/退出。")):
-            print("[tray] 托盘图标已启动: 右下角可看运行状态/打开日志/退出")
-        else:
-            print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")
-    except Exception as _tray_err:
-        print(f"[tray] 托盘启动失败({_tray_err}), 继续无托盘运行")
-    try:
-        asyncio.run(fwd.run())
-    except KeyboardInterrupt:
-        print("\n退出")
-        fwd.injector.stop()
 
 
 if __name__ == "__main__":

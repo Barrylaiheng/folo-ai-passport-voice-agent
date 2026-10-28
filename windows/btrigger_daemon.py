@@ -194,6 +194,70 @@ def app_matches(app_substr, title, exe):
     return s in (title or "").lower() or s in (exe or "").lower()
 
 
+# ------------------------------------------------ Agent 窗口找回/激活 -------
+# v0.4.1(2026-10-28 B 机联调回执 13.3): 直通解决「按键跨机送达」后,
+# 还剩「前台不是 Agent / Agent 窗口在后台」导致注入落空。与 A 机
+# _recover_agent 同语义: 注入前把 Agent 窗口找回并激活, 兜死焦点问题。
+
+def find_agent_window(app_substr):
+    """枚举顶层可见窗口, 返回第一个标题含 app_substr 的 hwnd(找不到 0)。"""
+    user32 = ctypes.windll.user32
+    found = []
+
+    def _cb(hwnd, _lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            t = (buf.value or "").lower()
+            if t and str(app_substr).strip().lower() in t:
+                found.append(hwnd)
+                return False
+        except Exception:
+            pass
+        return True
+
+    proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                              ctypes.c_void_p)(_cb)
+    try:
+        user32.EnumWindows(proc, 0)
+    except Exception:
+        pass
+    return found[0] if found else 0
+
+
+def activate_agent_window(app_substr):
+    """前台已匹配→True; 否则找回 Agent 窗口激活后再判(成功 True)。
+
+    SetForegroundWindow 受前台锁限制, 先模拟一次 ALT 按放解锁(无副作用)。
+    """
+    title, exe = get_foreground_title()
+    if app_matches(app_substr, title, exe):
+        return True
+    hwnd = find_agent_window(app_substr)
+    if not hwnd:
+        vlog(f"[focus] 找不到 {app_substr!r} 可见窗口 (前台 {title!r})")
+        return False
+    user32 = ctypes.windll.user32
+    ok = False
+    try:
+        if user32.IsIconic(hwnd):            # 最小化先还原
+            user32.ShowWindow(hwnd, 9)       # SW_RESTORE
+            time.sleep(0.05)
+        user32.keybd_event(0x12, 0, 0, 0)    # ALT down: 解前台锁
+        user32.keybd_event(0x12, 0, 2, 0)    # ALT up
+        ok = bool(user32.SetForegroundWindow(hwnd))
+        time.sleep(0.08)
+    except Exception as e:
+        vlog(f"[focus] 激活异常: {e}")
+    title2, exe2 = get_foreground_title()
+    matched = app_matches(app_substr, title2, exe2)
+    vlog(f"[focus] 找回 {app_substr!r}: {title!r}({exe!r}) → {title2!r}"
+         f"(SetForeground={'ok' if ok else 'fail'}, 匹配={'是' if matched else '否'})")
+    return matched
+
+
 # ------------------------------------------------ 主循环 -------------------
 
 def main():
@@ -316,19 +380,29 @@ def main():
         name = str(ev.get("event") or "")
         if name == "voice_key":
             phase = str(ev.get("phase") or "start")
+            if args.dry_run:
+                title, exe = get_foreground_title()
+                hit = app_matches(args.app_substr, title, exe)
+                vlog(f"[dry] voice_key/{phase}: 前台 {title!r} "
+                     f"({'命中' if hit else '未命中→将找回激活'})")
+                continue
             title, exe = get_foreground_title()
             if not app_matches(args.app_substr, title, exe):
-                vlog(f"[evt] voice_key/{phase} 跳过: 前台 {title!r}({exe!r}) "
-                     f"不含 {args.app_substr!r}")
-                continue
-            if args.dry_run:
-                vlog(f"[dry] 命中 {title!r}: 将注入 {args.voice_key} ({phase})")
-                continue
+                # 旧逻辑直接跳过 → B 机回执实证「已发但没录」; 现改为找回激活
+                if not activate_agent_window(args.app_substr):
+                    vlog(f"[evt] voice_key/{phase} 跳过: "
+                         f"{args.app_substr!r} 窗口不存在或激活失败")
+                    continue
             tap_key(args.voice_key, f"直通 {phase}")
         elif name == "enter":
             if args.dry_run:
                 vlog("[dry] 收到 enter: 将注入回车")
                 continue
+            title, exe = get_foreground_title()
+            if not app_matches(args.app_substr, title, exe):
+                if not activate_agent_window(args.app_substr):
+                    vlog("[evt] enter 跳过: Agent 窗口不存在或激活失败")
+                    continue
             tap_key(args.enter_key, "直通回车")
         else:
             vlog(f"[evt] 未知事件 {name!r} 来自 {src}, 忽略")

@@ -19,7 +19,16 @@ AI Passport 随身语音 · Agent 模式  v0.4.0
 - 跨机按键 UDP 直通：替代 DeskFlow，按键直发另一台电脑本地注入，不再"时灵时不灵"。
 - 自研 VBAN 发送端：不再依赖外部 VBANServer.exe，打包版也能稳定推流。
 - 系统托盘 v2：图标回到产品 VI，右键看运行状态，提示实时刷新。
+- 跨机自动发现（P1）：B 机助手开机即广播，A 机托盘「重新扫描」点一下自动配对，免手填 IP。
 完整更新见仓库 CHANGELOG.md；教程与排错见 README.md / docs/。
+
+【跨机使用 · 两台电脑（可选）】
+本 zip 自带 B 机助手，零 Python 依赖：
+1. 在另一台电脑（B 机）解压本 zip，进 btrigger/ 子目录，右键 setup-bmachine.cmd → 以管理员运行
+   （自动放行防火墙 + 登录自启）。
+2. 回到你手边这台（A 机），右下角托盘 → 右键「重新扫描」→ 配对列表出现 B 机 → 点一下即配对。
+   （老办法：编辑 voice-config.json 的 cross_trigger.target 填 B 机 IP 也行。）
+详细见 docs/CROSS_MACHINE.zh-CN.md。
 
 【排错】
 托盘菜单 → 打开日志 看 forwarder.log。安全软件（尤其火绒）可能把全局键盘钩子进程当键盘记录器周期强杀，

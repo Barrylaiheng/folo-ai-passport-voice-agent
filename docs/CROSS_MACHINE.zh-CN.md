@@ -1,82 +1,59 @@
-# 跨机使用指南（A 机 + B 机）
+# 跨机使用指南（v0.4.2 · 全自动跟随 DeskFlow 焦点）
 
-> 适用版本：v0.4.0（含 P0 一键部署 + P1 自动发现）
-> 场景：你有两台电脑，想把 AI Passport 的「语音键」从 A 机直接打到 B 机本地注入，
-> 同时把声音用 VBAN 推到 B 机，省去 DeskFlow 那种「时灵时不灵」的光标搬运。
+> 场景：局域网内多台电脑共用一个 AI Passport。**人坐在哪台电脑前，设备语音就落到哪台机**——
+> 由 DeskFlow 的屏幕焦点自动决定，全程零操作：不配对、不切换、不碰托盘。
 
 ---
 
-## 1. 原理（三路 UDP，互不耦合）
+## 1. 原理（三路 UDP + 焦点跟随）
 
 | 通道 | 端口 | 方向 | 作用 |
 |------|------|------|------|
-| 触发直通 | UDP 33334 | A → B | A 机按键 → B 机本地 `SendInput` 注入语音快捷键（Ctrl+D 之类） |
-| 音频流 | UDP 6980 (VBAN) | A → B | A 机把「你说的话」推到 B 机虚拟声卡，B 机 Agent 录到的就是你 |
-| 自动发现 beacon | UDP 33335 | B → A | B 机周期广播自己的 IP，A 机托盘自动列出可配对电脑 |
+| 触发直通 | UDP 33334 | A → 焦点机 | 焦点在客户机时，按键事件直发该机的 btrigger 助手本地注入 |
+| 音频流 | UDP 6980 (VBAN) | A → 所有在线机 | 声音推到各机虚拟声卡（不触发录音，多推无副作用） |
+| 在线发现 beacon | UDP 33335 | 各机 → A | 每台跑助手的电脑周期广播 `host/ip/port`，A 机自动维护在线表 |
+| 焦点感知 | 本地日志 | — | A 机尾随 DeskFlow 日志的 `switch from X to Y` 行，实时知道人在哪台机前 |
 
-- **A 机 = 你手边操作 AI Passport 的电脑**，跑开源的 `AI-Passport-Voice-v0.4.0.exe`（即开即用，零配置）。
-- **B 机 = 你想被远程注入语音键的电脑**（比如跑 WorkBuddy 的主力机），跑 `btrigger/` 里的 B 机助手。
-- DeskFlow 只负责把鼠标光标搬过去；本方案按键和音频都不走 DeskFlow，因此不再受光标焦点漂移影响。
-
----
-
-## 2. B 机：一键部署（零 Python 依赖）
-
-B 机**不需要装 Python、不需要 AI agent 配置**。发布 zip 里已经冻结好了独立 exe。
-
-1. 在 B 机解压 `AI-Passport-Voice-v0.4.0.zip`。
-2. 进入 `btrigger/` 子目录，**右键 `setup-bmachine.cmd` → 以管理员身份运行**。
-   - 放行防火墙入站 UDP 33334（"AI Passport btrigger" 规则）。
-   - 把 btrigger 写进登录自启（重启后自动跑）。
-   - 弹出 B 机局域网 IPv4，记下来备用（自动发现用不上，但手动配对时会看到）。
-3. 完成后 btrigger 在后台运行（无窗口，日志在同目录 `btrigger.log`）。
-   - 它每 2 秒向 `255.255.255.255:33335` 广播 beacon，携带 `host / ip / port`。
-
-> 想停掉：任务管理器结束 `AI-Passport-btrigger-v0.4.0.exe`，或删掉
-> `shell:startup` 里的 `AI-Passport-btrigger 自启.bat`。
+- **焦点在 A 机本身** → A 机本地注入（铁律：本机永远可用）。
+- **焦点在某台客户机** → 触发直通该机；该机不在线（30s 无 beacon）或 DeskFlow 未跑 → 兜底本机。
+- **注入方式**：btrigger 用 `keybd_event`（VK 方式）——实测 WorkBuddy 录音键只认 VK 注入，
+  扫描码 SendInput 不激活（v0.4.2 定案）。注入前还会自动找回并激活 Agent 窗口。
 
 ---
 
-## 3. A 机：两种配对方式
+## 2. B 机（每台想被"跟着用"的电脑）：一次性部署
 
-### 方式一 · 自动发现（推荐，P1）
+零 Python 依赖，发布包里是冻结好的独立 exe。
 
-A 机托盘默认就在监听 beacon，无需手填 IP：
+1. 解压发布 zip，进入 `btrigger/` 子目录，**右键 `setup-bmachine.cmd` → 以管理员身份运行**：
+   - 放行防火墙入站 UDP 33334（规则名 "AI Passport btrigger"）；
+   - 注册登录自启（重启后自动接管）；
+   - 显示本机局域网 IP（仅核对信息用，**不需要填到任何地方**）。
+2. 确认系统麦克风（设置 → 声音 → 输入）选 **CABLE Output (VB-Audio Virtual Cable)**。
+   没装 VB-Cable 先从 vb-audio.com/Cable 安装。
+3. 前台打开 WorkBuddy 或 Trae。完成——这台机从此自动可用。
 
-1. 右下角托盘图标 → **右键 → 重新扫描**（清空旧列表，重新监听 33335）。
-2. 几秒内托盘菜单的「配对列表」里会出现 `配对 → <B机名> (<B机IP>)`。
-3. **点选它** → 自动完成：
-   - 热改运行态 `cross.target`，立刻生效（不用重启 A 机 exe）；
-   - 同时把 `cross_trigger.target` 写进 `voice-config.json` 持久化（下次启动沿用）。
-
-> token 不会因此被覆盖：沿用 B 机「学习首个来源」安全模型（谁先打到 33334 就信任谁）。
-
-### 方式二 · 手动填 IP（老办法，仍可用）
-
-编辑 A 机同目录的 `voice-config.json`：
-
-```json
-{
-  "cross_trigger": { "target": "192.168.110.127" }
-}
-```
-
-- `target` 填 B 机局域网 IP（方式二里 setup 弹出的那个，或 B 机 `ipconfig` 查到的 IPv4）。
-- 留空 = 本机注入（单机模式，零影响）。
-- 改完重启 A 机 exe 生效。
+> 想停掉：任务管理器结束 `AI-Passport-btrigger-v0.4.2.exe`；
+> 彻底卸载再删 `shell:startup` 里的 `btrigger_daemon.bat`。
+> 日志：exe 同目录 `btrigger.log`。
 
 ---
 
-## 4. 验证是否联通
+## 3. A 机：零配置
 
-A 机托盘菜单会实时显示三段状态：
+正常双击 `AI-Passport-Voice-v0.4.2.exe` 即可，不需要填任何 IP：
 
-- `设备: 在线 ✓` —— AI Passport 硬件已连上
-- `模式: 跨机 → B(192.168.x.x)` —— 已配对到 B 机（显示 B 的 IP）
-- `音频: VB-Cable 就绪` —— A 机音频链路正常
+- 托盘菜单实时显示「跟随： 焦点在 X」与在线电脑列表（纯观测，没有需要点的东西）。
+- `voice-config.json` 的 `cross_trigger.target` 与 `vban.target` 都**留空**即自动跟随；
+  老用户若曾手填过 IP，清空即回到跟随模式。
 
-看到「模式: 跨机 → B(...)」即代表触发直通已生效。按住 A 机设备**上键**说话，
-B 机对应 AI 应用应开始录音；松手出字，B 机**下键**发送。
+---
+
+## 4. 验证
+
+1. 本机：光标进 WorkBuddy/Trae → 按设备上键 → 本机开始录音；下键发送。
+2. 跨机：用 DeskFlow 切到 B 机 → 按设备上键 → B 机的 Agent 开始录音，下键发送。
+   A 机日志同步出现 `焦点 <B机屏幕名> → 直通 <B机IP> (已发)`。
 
 ---
 
@@ -84,16 +61,17 @@ B 机对应 AI 应用应开始录音；松手出字，B 机**下键**发送。
 
 | 现象 | 排查 |
 |------|------|
-| 托盘配对列表里看不到 B 机 | ① A/B 是否在**同一网段**（beacon 不过路由器）；② B 机 `btrigger.exe` 是否在跑；③ B 机防火墙是否放行了**出站**广播（一般默认允许）；④ A 机点过「重新扫描」了吗 |
-| 配对成功但 B 机不注入 | B 机防火墙入站 UDP 33334 是否被放行（setup 已加规则，若手关过需重开）；B 机前台是否是已配置的 Agent（WorkBuddy/Trae） |
-| 触发通了但 B 机听不到声音 | A 机 `voice-config.json` 的 `vban.target` 是否填了 B 机 IP；B 机是否装了 VB-CABLE 且设为默认录制设备 |
-| 想换 B 机 | A 机托盘「重新扫描」→ 点新的配对项即可（自动覆盖旧 target） |
+| 切到 B 机按键没反应 | ① B 机 `btrigger.exe` 是否在跑（看 `btrigger.log` 有无收到触发）；② 防火墙入站 UDP 33334（重跑 setup）；③ B 机前台是否 WorkBuddy/Trae；④ A/B 是否同网段 |
+| 触发到了但 B 机不录音 | ① B 机是否装 VB-Cable 且输入设备选 CABLE Output；② B 机 Agent 的语音热键是否为 ctrl+d（WorkBuddy）/alt+v（Trae），不同则改 btrigger 启动参数 `--voice-key` |
+| 托盘不显示某台在线机 | 那台机的 btrigger 没跑，或 beacon 被防火墙拦（出站广播默认放行） |
+| DeskFlow 没跑时 | 自动兜底本机注入，跨机暂停，不影响单机使用 |
 
 ---
 
 ## 6. 给想自己编译的开发者
 
-- B 机助手冻结：`windows/build/AI-Passport-btrigger-v0.4.0.spec`（纯标准库零依赖，`console=False` 后台运行）。
-- 发布包打包：`tools/make_release_zip.py`（自动把 `btrigger/` 子目录、setup 脚本、`_internal` 运行时一并打进 zip）。
-- beacon 协议：类型字节 `0x22` + JSON `{"role":"btrigger","host","ip","port"}`，广播到 `255.255.255.255:33335`。
-- 自动发现监听端：`hotkey_forwarder._start_beacon_listener`（A 机侧，`--b-discover-port`，默认 33335，0=关闭）。
+- B 机助手冻结：`windows/build/AI-Passport-btrigger-v0.4.2.spec`（纯标准库，`console=False`）。
+- 发布包打包：`tools/make_release_zip.py`（自动带上 `btrigger/`、setup 脚本、两份 `_internal` 运行时）。
+- beacon 协议：类型字节 `0x22` + JSON `{"role":"btrigger","host","ip","port"}` → `255.255.255.255:33335`。
+- 焦点跟随实现：`hotkey_forwarder.py` 的 `_start_deskflow_watch` / `_route_target`；
+  在线表 `_start_beacon_listener`；音频跟随 `_start_vban_follow`。

@@ -876,21 +876,18 @@ class Forwarder:
         self.apps = list(getattr(args, "apps", None) or [])
         self.send_key = str(getattr(args, "send_key", "enter") or "enter")
         self.stop_on_release = bool(getattr(args, "stop_on_release", True))
-        # 跨机直通触发(2026-10-27, 联调事件簿 §11.3 根治方向): 双机场景下
-        # 原路径 = 本地注入 Ctrl+D → DeskFlow 按光标转发, 光标状态/焦点脱节时
-        # Passport 触发失灵(2026-10-27 下午 B 机实测)。配置 cross_trigger.target
-        # 后改为 UDP 直通: 触发事件发 B 机助手(btrigger_daemon.py)本地注入,
-        # 按键路径与光标所在屏幕彻底解耦; 音频链路(VBAN)不变。
+        # 跨机触发(方案a·跟随 DeskFlow 焦点, 2026-10-28 重构): 事件去向不再由
+        # 人工配置/托盘配对决定, 而是跟随 DeskFlow 当前焦点屏幕 —— 人坐在哪台
+        # 电脑前(DeskFlow 键鼠切到哪台屏), 设备语音就落到哪台机: 焦点在本机 →
+        # 本机注入; 焦点在客户机 → UDP 直通该机助手(btrigger)本地注入。
+        # sender 常驻但 dormant: target 每次发送前按焦点热改(send() 每包读
+        # self.target)。DeskFlow 未跑/焦点机不在线 → 一律兜底本机注入
+        # (铁律: 本地永远可用)。不再有「跨机独占本机」的互斥模式。
         xt = getattr(args, "cross_trigger", None) or {}
-        self.cross = None
-        if str((xt or {}).get("target") or "").strip():
-            self.cross = CrossTriggerSender(
-                xt.get("target"),
-                xt.get("port") or CROSS_TRIGGER_PORT,
-                xt.get("token") or "")
-            print(f"[cross] 跨机直通已启用: 触发事件 → "
-                  f"{self.cross.target}:{self.cross.port} "
-                  f"(B 机助手注入, 本地不再注入语音键/回车)")
+        self._cross_token = str((xt or {}).get("token") or "")
+        self._cross_port = int((xt or {}).get("port") or CROSS_TRIGGER_PORT)
+        self.cross = CrossTriggerSender("", self._cross_port, self._cross_token)
+        self.focus_screen = socket.gethostname()  # 初始假定在本机, 随后被日志纠偏
         # 跨网模式(2026-10-14): 穿透隧道公网地址(host:port) + 配对令牌。
         # remote_endpoint 非空时, device.hello 后自动推送 cfg.udp 存进设备 NVS。
         self.remote_endpoint = str(getattr(args, "remote_endpoint", "") or "").strip()
@@ -917,12 +914,14 @@ class Forwarder:
         self.cdp = CdpClient(self.cdp_port or 9222)
         self._cdp_active = False  # CDP 是否正在录音(松手停录要走 CDP 完成)
         self.loop = None
-        # 跨机自动发现(A 机侧, P1): 监听 B 机 beacon, 维护 discovered 列表
+        # 跨机自动发现(A 机侧): 监听各机 beacon, 维护 discovered(host→ip 表)
         self.discovered = {}
         self._beacon_stop = None
         _dp = int(getattr(args, "b_discover_port", 0) or 0)
         if _dp > 0:
             _start_beacon_listener(self, _dp)
+        # 方案a: 跟随 DeskFlow 焦点(日志尾随), 决定触发去向
+        _start_deskflow_watch(self)
         # 焦点观察器(2026-10-15 治本): 持续记录"用户最近一次所在前台的 Agent
         # 窗口"。按键瞬间"前台是谁"不可信(用户在开发任何东西时焦点随时会被
         # 终端/浏览器/被开发程序抢走), 找回目标必须以此为锚, 而非碰运气的前台。
@@ -1223,6 +1222,25 @@ class Forwarder:
             except Exception:
                 pass  # 观察器永不因单次异常退出
 
+    def _route_target(self):
+        """方案a: 返回本次触发应去的机器 ip; None = 本机注入。
+
+        依据 fwd.focus_screen(DeskFlow 日志尾随实时维护): 焦点=本机屏幕名
+        → None; 焦点=客户机 → 从 beacon 表(discovered, 30s TTL)按 host 查
+        ip; 查不到(未开机/助手没跑/非 Windows 机) → 兜底 None 走本机。
+        """
+        screen = str(getattr(self, "focus_screen", "") or "").strip()
+        local = socket.gethostname().strip()
+        if not screen or screen.lower() == local.lower():
+            return None
+        now = time.monotonic()
+        for ip, info in (self.discovered or {}).items():
+            if now - info.get("last", 0) < 30 and \
+               str(info.get("host", "")).strip().lower() == screen.lower():
+                return ip
+        print(f"[route] 焦点机 {screen} 不在线(30s 内无 beacon), 兜底本机注入")
+        return None
+
     def press_agent_voice_key(self, action):
         """通用 Agent 模式: 向目标 Agent 注入它的语音快捷键(键盘, 非鼠标)。
 
@@ -1237,18 +1255,22 @@ class Forwarder:
         不动它); 前台被抢(用户在开发任何东西时都会发生) → 焦点观察器锚定
         "用户最近在用的 Agent"确定性找回, 与抢焦点者是谁无关。
 
-        直通模式(2026-10-27): 配置 cross_trigger.target 后, 事件直通 B 机助手
-        本地注入, 本地完全不注入 —— 前台判定由 B 机助手把关。
-        ⚠️部署纪律(2026-10-27 实证): 直通启用后 B 机助手必须在跑, 否则两边
-        全哑。出厂/默认配置 target 必须留空(本地注入), 只在 B 机助手部署好
-        后才打开。不做"双通道并发": B 机前台常态就是 WorkBuddy, 并发会双机
-        同时录音答题。
+        跟随焦点模式(方案a, 2026-10-28): 事件去向由 DeskFlow 当前焦点屏幕
+        自动决定 —— 人用 DeskFlow 把键鼠切到哪台电脑, 设备语音就落到哪台机。
+        焦点在本机 → 本机注入(铁律: 本地永远可用); 焦点在客户机 → UDP 直通
+        该机助手(btrigger)本地注入, 前台判定由它把关。焦点机不在线(30s 内
+        无 beacon)或 DeskFlow 未跑 → 兜底本机注入。不再有手动配对/切换,
+        也不再有「跨机独占本机」的互斥。
         """
-        if self.cross is not None:
-            phase = "stop" if ("停止" in action or "松开" in action) else "start"
+        phase = "stop" if ("停止" in action or "松开" in action) else "start"
+        tgt = self._route_target()
+        if tgt:
+            self.cross.target = tgt  # send() 每包读 self.target, 热改零成本
             ok = self.cross.send({"event": "voice_key", "phase": phase})
-            print(f"[cross] 语音键直通 → {phase} ({'已发' if ok else '发送失败'})")
+            print(f"[route] 焦点 {getattr(self, 'focus_screen', '?')} → "
+                  f"直通 {tgt} ({'已发' if ok else '发送失败'})")
             return
+        # 本机注入(焦点在本机, 或焦点机不在线兜底)
         # 长按型语音键(WorkBuddy 5.8.3 "长按 Alt"): 停录=抬起即可, 无需找回
         # 窗口 —— 抬键是全局键盘状态, 与前台是谁无关, 抢先处理避免多余动作。
         if getattr(self, "_vk_held", None) and ("停止" in action or "松开" in action):
@@ -1607,11 +1629,19 @@ def load_local_config():
     base = os.path.dirname(sys.executable if getattr(sys, "frozen", False)
                            else os.path.abspath(__file__))
     candidates = ["voice-config.json", "config.local.json", "voice-config.example.json"]
+    # onedir 冻结版: example 由 datas 打进 _internal/; PyInstaller 重建 dist 会
+    # 清掉 exe 旁的用户配置, 这里兜底到 _MEIPASS 保证「开箱即用」不空跑
+    search_bases = [base, getattr(sys, "_MEIPASS", "")]
     used = None
     for name in candidates:
-        p = os.path.join(base, name)
-        if os.path.isfile(p):
-            used = p
+        for b in search_bases:
+            if not b:
+                continue
+            p = os.path.join(b, name)
+            if os.path.isfile(p):
+                used = p
+                break
+        if used:
             break
     if used is None:
         print("[config] 未找到任何配置文件(含出厂 example), 程序将以空配置运行; "
@@ -1823,6 +1853,87 @@ def _maybe_start_vban(cfg):
     return None
 
 
+def _local_ip():
+    """本机局域网 IP(UDP connect 技巧, 不发包)。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def _start_vban_follow(cfg, fwd):
+    """方案a·音频跟随(2026-10-28): 向所有在线机自动推流, 下线自动停。
+
+    触发跟随 DeskFlow 焦点(只发一台), 音频则广播给所有在线机 —— 音频本身
+    不触发录音, 只有收到触发的机器才会录, 故多推无副作用, 还免去切屏瞬间
+    的建流延迟。vban.target 显式配置时维持旧静态推流, 不做跟随(高级用户)。
+    """
+    vban = cfg.get("vban") or {}
+    if str(vban.get("target") or "").strip():
+        print("[vban] 检测到显式 vban.target, 维持静态推流(不做跟随)")
+        return
+    port = str(vban.get("port") or 6980)
+    samplerate = str(vban.get("samplerate") or 48000)
+    channels = str(vban.get("channels") or 2)
+    import subprocess
+    frozen = getattr(sys, "frozen", False)
+    base = APP_DIR
+    sender_script = os.path.join(base, "vban_sender.py")
+
+    def _spawn(ip):
+        if frozen:
+            cmd = [sys.executable, "--vban-sender", "--target", ip,
+                   "--port", port, "--samplerate", samplerate,
+                   "--channels", channels]
+        elif os.path.isfile(sender_script):
+            cmd = [sys.executable, sender_script, "--target", ip,
+                   "--port", port, "--samplerate", samplerate,
+                   "--channels", channels]
+        else:
+            return None
+        try:
+            return subprocess.Popen(
+                cmd, cwd=base, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as e:
+            print(f"[vban] 推流 {ip} 启动失败: {e}")
+            return None
+
+    def _loop():
+        procs = {}
+        myip = ""
+        while True:
+            time.sleep(5)
+            try:
+                now = time.monotonic()
+                myip = _local_ip() or myip
+                online = {ip for ip, info in (fwd.discovered or {}).items()
+                          if now - info.get("last", 0) < 30 and ip != myip}
+                for ip in list(procs):
+                    if ip not in online:
+                        try:
+                            procs[ip].terminate()
+                        except Exception:
+                            pass
+                        del procs[ip]
+                        print(f"[vban] {ip} 已下线, 停止推流")
+                for ip in online - set(procs):
+                    p = _spawn(ip)
+                    if p:
+                        procs[ip] = p
+                        print(f"[vban] 音频跟随推流 → {ip}:{port} "
+                              f"({samplerate}Hz/{channels}ch)")
+            except Exception:
+                pass  # 跟随线程永不退出
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def main():
     # 自派发: 冻结 exe 以 --vban-sender 复用自身运行 VBAN 发送端子进程,
     # 免去单独解释器/打包 python 的复杂度(详见 _maybe_start_vban)
@@ -2019,8 +2130,9 @@ def main():
     else:
         args.focus_click = None
     args.apps = default_apps
-    global fwd  # P1: 托盘回调(_on_cfg/_on_scan/_pair_with/_tray_menu)为模块级函数, 需经全局 fwd 访问运行态
+    global fwd  # P1: 托盘回调(_on_cfg/_on_scan/_tray_menu)为模块级函数, 需经全局 fwd 访问运行态
     fwd = Forwarder(args)
+    _start_vban_follow(cfg, fwd)  # 方案a: 音频跟随在线机自动推流
     print("=" * 66)
     print("           AI Passport · 随身 AI 语音服务已启动")
     print("=" * 66)
@@ -2099,11 +2211,12 @@ def main():
                 _ico = _cand
         if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
                       menu_fn=_tray_menu,
-                      callbacks={"cfg": _on_cfg, "scan": _on_scan, "pair": _pair_with},
+                      callbacks={"cfg": _on_cfg, "scan": _on_scan},
                       balloon=("AI 护照语音已启动",
                                "长按设备 UP 键说话, 文字自动进当前窗口。"
-                               "右键托盘图标可看状态/配对/打开日志/退出。")):
-            print("[tray] 托盘图标已启动: 右下角可看运行状态/配对B机/打开日志/退出")
+                               "语音自动跟随 DeskFlow 焦点: 人在哪台电脑, "
+                               "话就落在哪台。右键托盘看状态/日志/退出。")):
+            print("[tray] 托盘图标已启动: 右下角可看跟随焦点/在线机/日志/退出")
         else:
             print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")
     except Exception as _tray_err:
@@ -2157,8 +2270,67 @@ def _start_beacon_listener(fwd, port):
     threading.Thread(target=_loop, daemon=True).start()
 
 
+# ---------- 方案a: 跟随 DeskFlow 焦点(2026-10-28) ----------
+def _deskflow_log_path():
+    p = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
+                     "Deskflow", "deskflow-daemon.log")
+    return p if os.path.isfile(p) else None
+
+
+def _start_deskflow_watch(fwd):
+    """尾随 DeskFlow daemon 日志, 实时维护 fwd.focus_screen(焦点所在屏幕名)。
+
+    日志样例: [..] INFO: switch from "A" to "B" at x,y
+    本机屏幕名 = socket.gethostname()(与 DeskFlow 屏幕名一致, 2026-10-28 实测)。
+    焦点在本机 → 本机注入; 焦点在客户机 → 触发直通(beacon 表 host→ip)。
+    DeskFlow 未安装/未跑 → focus_screen 恒为本机名, 行为=纯本机模式(铁律)。
+    """
+    path = _deskflow_log_path()
+    local = socket.gethostname()
+    fwd.focus_screen = local  # 先给铁律兜底值, 随后用日志尾部纠偏
+    if not path:
+        print("[deskflow] 未找到 DeskFlow 日志, 恒为本机注入")
+        return
+    import re as _re
+    pat = _re.compile(r'switch from "([^"]+)" to "([^"]+)"')
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            ms = pat.findall(f.read())
+        if ms:
+            fwd.focus_screen = ms[-1][1]  # 日志里最后一次切换 = 当前焦点
+        print(f"[deskflow] 跟随焦点已启动: 本机={local} "
+              f"当前焦点={fwd.focus_screen}")
+    except OSError as e:
+        print(f"[deskflow] 读日志失败({e}), 恒为本机注入")
+        return
+
+    def _loop():
+        while True:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    f.seek(0, os.SEEK_END)  # 只跟启动之后的新事件
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.3)
+                            continue
+                        m = pat.search(line)
+                        if m and m.group(2) != fwd.focus_screen:
+                            fwd.focus_screen = m.group(2)
+                            print(f"[deskflow] 焦点 → {fwd.focus_screen}")
+            except FileNotFoundError:
+                time.sleep(2)  # 日志轮转/被清, 稍后重开
+            except OSError:
+                time.sleep(2)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def _on_cfg():
-    """托盘"配置跨机(B机)": 打开 voice-config.json 让用户手填 target。"""
+    """托盘「打开配置文件」: 打开 voice-config.json(VBAN 目标/热键等)。"""
     cfg_path = os.path.join(APP_DIR, "voice-config.json")
     if os.path.isfile(cfg_path):
         try:
@@ -2174,37 +2346,8 @@ def _on_scan():
     print("[scan] 已清空可配对列表, 重新监听 beacon")
 
 
-def _pair_with(idx):
-    """托盘配对列表点选: 写 voice-config.json + 热改 fwd.cross.target。"""
-    disc = getattr(fwd, "discovered", None) or {}
-    items = [ip for ip, v in disc.items()
-             if time.monotonic() - v.get("last", 0) < 30]
-    if idx < 0 or idx >= len(items):
-        print("[pair] 无效配对项", file=sys.stderr)
-        return
-    ip = items[idx]
-    cfg_path = os.path.join(APP_DIR, "voice-config.json")
-    try:
-        data = {}
-        if os.path.isfile(cfg_path):
-            with open(cfg_path, encoding="utf-8-sig") as f:
-                data = json.load(f)
-        xt = data.setdefault("cross_trigger", {})
-        xt["target"] = ip
-        # token 留空: 沿用 B 机"学习首个来源"安全模型, 不覆盖已有 token
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[pair] 写配置失败: {e}", file=sys.stderr)
-    if fwd.cross is None:
-        fwd.cross = CrossTriggerSender(ip, CROSS_TRIGGER_PORT, "")
-    else:
-        fwd.cross.target = ip
-    print(f"[pair] 已配对 B 机 {ip} (热更新 cross.target, 配置已持久化)")
-
-
 def _tray_menu():
-    """结构化托盘菜单(状态三段 + 动作 + 配对列表)。"""
+    """结构化托盘菜单(状态三段 + 动作)。方案a: 只观测, 无需手动配对/切换。"""
     from tray_icon import IDM_CFG, IDM_SCAN
     status = []
     try:
@@ -2218,10 +2361,25 @@ def _tray_menu():
     except Exception:
         pass
     try:
-        if fwd.cross is not None:
-            status.append(f"模式: 跨机 → B({fwd.cross.target})")
+        scr = str(getattr(fwd, "focus_screen", "") or "?")
+        local = socket.gethostname().strip()
+        if scr.lower() == local.lower():
+            status.append("跟随: 焦点在本机 → 本机注入")
         else:
-            status.append("模式: 本机注入")
+            tgt = fwd._route_target()
+            if tgt:
+                status.append(f"跟随: 焦点在 {scr} → 直通 {tgt}")
+            else:
+                status.append(f"跟随: 焦点在 {scr}(不在线) → 本机注入")
+    except Exception:
+        pass
+    try:
+        now = time.monotonic()
+        online = [f"{info.get('host', '?')}({ip})"
+                  for ip, info in fwd.discovered.items()
+                  if now - info.get("last", 0) < 30]
+        if online:
+            status.append("在线机: " + "  ".join(online))
     except Exception:
         pass
     try:
@@ -2229,15 +2387,8 @@ def _tray_menu():
                                             else "未就绪"))
     except Exception:
         pass
-    actions = [(IDM_CFG, "配置跨机(B机)…"), (IDM_SCAN, "重新扫描")]
-    pairs = []
-    try:
-        now = time.monotonic()
-        for ip, info in fwd.discovered.items():
-            if now - info.get("last", 0) < 30:
-                pairs.append((ip, info.get("host", ip)))
-    except Exception:
-        pass
+    actions = [(IDM_CFG, "打开配置文件…"), (IDM_SCAN, "重新扫描在线机")]
+    pairs = []  # 方案a: 焦点跟随自动路由, 无手动配对
     return {"status": status, "actions": actions, "pairs": pairs}
 
 

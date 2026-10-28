@@ -90,18 +90,18 @@ Agent 模式的核心能力（这也是本项目的架构卖点）：
 2. 在 `apps` 里加一条：`{"title_contains": "应用窗口标题关键词", "exe_contains": "进程名关键词", "voice_key": "它的快捷键"}`
 3. 重启转发器即可。应用识别优先匹配前台窗口标题或进程名（不区分大小写）。
 
-## 两台电脑联动（可选）：跨机按键 UDP 直通
+## 两台电脑联动（可选）：语音跟随 DeskFlow 焦点（v0.4.2 起，全自动）
 
-如果你和作者一样有**两台电脑共用一台 Passport**，想在没接设备的那台（B 机）也能用语音键：
+如果你和作者一样有**多台电脑共用一台 Passport**：人坐在哪台电脑前，设备语音就落到哪台机。
 
-- **旧方案的坑**：用 DeskFlow 跨屏转发按键，但它只转发按键、不转发设备音频，且服务端钩子分不清"软件注入键"和"真人键"，光标脱节时常"时灵时不灵"——按下设备键，B 机没反应。
-- **新方案（v0.4.0 起）**：A 机（接设备）转发器配置 `"cross_trigger": {"target": "B机IP", "port": 33334}`，按键事件直接 UDP 发往 B 机；B 机跑 `btrigger_daemon.py`（`python btrigger_daemon.py --install-startup` 装自启），收到后在**前台是 WorkBuddy** 时本地注入 `Ctrl+D`。
-  - 默认 `cross_trigger.target` 留空 = 本机注入（单机用户零感知）。
-  - B 机需放行 UDP 33334 入站；助手只在"前台窗口是 WorkBuddy"时注入（联调前先把 WorkBuddy 点成最前面）。
-  - 想退回？把 `cross_trigger.target` 清空即恢复本机注入，DeskFlow 仅作应急回退。
-- 音频跨机不变：仍走 VBAN（见上一段 `vban.target`）。按键跨机走 UDP 直通，两条链路解耦。
+- **全自动，零配置**：A 机尾随 DeskFlow 日志实时感知焦点在哪台机——焦点在本机就本机注入；
+  焦点在客户机就把触发直通那台机（各机跑 `btrigger/` 里的助手，开机自启 + 自动广播在线状态）。
+  焦点机不在线自动兜底本机，永不哑按；音频自动向所有在线机推流，下线自动停。
+- **B 机一次性部署**：解压发布 zip → `btrigger/` 里右键 `setup-bmachine.cmd` 管理员运行
+  （放行防火墙 UDP 33334 + 登录自启），系统麦克风选 CABLE Output 即完成。
+- 注入用 `keybd_event`（VK 方式）：实测 WorkBuddy 录音键只认 VK 注入；注入前还会自动找回激活 Agent 窗口。
 
-详细部署与取证见仓库 docs 与《两机联调事件簿》。
+详细原理与排错见 [docs/CROSS_MACHINE.zh-CN.md](docs/CROSS_MACHINE.zh-CN.md)。
 
 ## 按键说明（设备端）
 

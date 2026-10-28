@@ -62,12 +62,12 @@ macOS、Linux 和 ARM Windows 不在当前语音应用包的验收范围。
 | 文件 | 用途 |
 | --- | --- |
 | **`start.cmd`** | 每天双击这个启动，不要单独拖出文件夹 |
-| **`AI-Passport-Voice-v0.4.0.exe`** | 主程序，start.cmd 会自动调用 |
+| **`AI-Passport-Voice-v0.4.2.exe`** | 主程序，start.cmd 会自动调用 |
 | `diagnose.cmd` | 环境检查入口 |
 | `voice-config.example.json` | 配置样例；需要改键位时复制为 voice-config.json |
 | `install.cmd`、`.py` 文件 | 源码运行使用；有 EXE 的普通用户不用操作 |
 
-**完成标志：windows 文件夹里同时有 start.cmd 和 AI-Passport-Voice-v0.4.0.exe。**
+**完成标志：windows 文件夹里同时有 start.cmd 和 AI-Passport-Voice-v0.4.2.exe。**
 不要直接在压缩软件里双击运行。想从桌面启动，可右键 start.cmd 创建快捷方式，再把快捷方式放到桌面。
 
 如果只有 `.py`、没有 EXE，通常下载的是 GitHub 的 **Source code (zip)** 或克隆的源码。
@@ -265,7 +265,7 @@ macOS、Linux 和 ARM Windows 不在当前语音应用包的验收范围。
 ```
 
 6. 保留英文双引号、逗号，最后一项后不要加逗号。保存为 **UTF-8**。
-7. 确认文件在 **AI-Passport-Voice-v0.4.0.exe 旁边**，文件名不是 voice-config.json.txt。
+7. 确认文件在 **AI-Passport-Voice-v0.4.2.exe 旁边**，文件名不是 voice-config.json.txt。
 8. 双击 start.cmd，电脑窗口应显示 **热键: left-shift  模式: hold**。
 
 想改回右 Shift 时，把 hotkey_key 改为 **right-shift**，输入法也改为右 Shift，保存并重启转发窗口。
@@ -331,8 +331,8 @@ device_ip 仅在同一局域网允许单播、但广播发现受阻时有用，�
 Get-Content -LiteralPath .\voice-config.json -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 
 # 只列出键名或声卡，然后退出
-.\AI-Passport-Voice-v0.4.0.exe --list-keys
-.\AI-Passport-Voice-v0.4.0.exe --list-devices
+.\AI-Passport-Voice-v0.4.2.exe --list-keys
+.\AI-Passport-Voice-v0.4.2.exe --list-devices
 
 # 临时使用左 Shift；只影响本次运行，不会写回 JSON
 .\start.cmd --key left-shift --mode hold
@@ -381,9 +381,7 @@ Windows 自带语音输入可用 **Win + H** 打开，转发器也能模拟 `win
 
 解决方法很简单：**切换到另一台电脑使用时，先停掉旧电脑上的转发器（关掉 start.cmd 窗口），再在新电脑启动 start.cmd。**
 
-**不想来回停启？用跨机按键 UDP 直通（v0.4.0 起推荐）：** A 机（接设备）在 `voice-config.json` 配 `cross_trigger.target` 指向 B 机 IP，B 机跑 `btrigger_daemon.py`（`--install-startup` 装自启），按键事件就直发 B 机本地注入语音键，两台电脑都能用、无设备冲突。详见 [故障排查 · 同局域网多台电脑](TROUBLESHOOTING.zh-CN.md#6-同局域网多台电脑共用一台设备)。
-
-> ⚠ 注意：UDP 直通只转发按键、不转发设备音频——B 机录音用的是它**自己的麦克风**（拾取房间声音），识别质量打折。想要 Passport 近讲麦的质量，请留在接设备的电脑前使用。应急回退才用 DeskFlow（已知不稳定），详见同上。
+**不想来回停启？升级到 v0.4.2 的「语音跟随 DeskFlow 焦点」（全自动）：** 两台机各跑一份程序（A 机主程序 + B 机 `btrigger/` 助手），人坐在哪台电脑前，语音就自动落到哪台机——不配对、不切换、不用来回停启。详见 [CROSS_MACHINE.zh-CN.md](CROSS_MACHINE.zh-CN.md)（已知不稳定），详见同上。
 
 本仓转发器已内置冲突自检：若发现同局域网另一台电脑也在运行转发器，会直接在日志里标出“⚠ 另一台电脑也在运行语音转发器”，并提示同一台设备同一时间只在一台运行。如果新电脑启动后 60 秒还收不到设备，多半是设备被另一台电脑占用了——先去那台停掉转发器即可。
 
@@ -450,7 +448,7 @@ Windows 自带语音输入可用 **Win + H** 打开，转发器也能模拟 `win
 Codex 或终端中不想等待“按任意键”时，用 EXE 入口：
 
 ```powershell
-.\AI-Passport-Voice-v0.4.0.exe --diagnose
+.\AI-Passport-Voice-v0.4.2.exe --diagnose
 ```
 
 诊断不能确认 Windows 当前默认输入、输入法实际音源、设备音频到达或识别出字。
@@ -476,9 +474,6 @@ Codex 或终端中不想等待“按任意键”时，用 EXE 入口：
 同时把声音用 VBAN 推过去（替代 DeskFlow 那种光标搬运），本版本已内置一键方案：
 
 - **B 机零配置**：解压发布包后，进 `btrigger/` 子目录，右键 `setup-bmachine.cmd` → 以管理员运行，
-  自动放行防火墙 + 登录自启，开机即广播发现信号。
-- **A 机自动配对**：右下角托盘 → 右键「重新扫描」→ 配对列表出现 B 机 → 点一下即配对（免手填 IP）。
-- 仍想手动填也行：编辑 `voice-config.json` 的 `cross_trigger.target` 填 B 机 IP。
-
-A 机托盘会显示「模式: 跨机 → B(IP)」表示已联通。完整原理、通道端口与排错表见
+  自动放行防火墙 + 登录自启。此后 A 机跟随 DeskFlow 焦点自动发现并直通 B 机，托盘只读显示「跟随： 焦点在 X」与在线机，无需任何点选。
+完整原理、通道端口与排错表见
 [跨机使用指南](CROSS_MACHINE.zh-CN.md)。

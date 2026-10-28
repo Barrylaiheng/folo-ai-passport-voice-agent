@@ -276,10 +276,19 @@ def main():
                                "Microsoft", "Windows", "Start Menu",
                                "Programs", "Startup")
         bat = os.path.join(startup, "btrigger_daemon.bat")
-        py = sys.executable
+        os.makedirs(os.path.dirname(bat), exist_ok=True)   # 兜底: 启动目录不存在时先建
+        if getattr(sys, "frozen", False):
+            # 冻结 exe 自包含: 自启行只跑 exe 本身, 绝不写脚本位置参数
+            # (否则 exe 启动时把这串 _internal/btrigger_daemon.py 当位置参数
+            #  交给 argparse → "unrecognized arguments" → exit 2, 开机自启崩)
+            prog = f'"{sys.executable}"'
+        else:
+            # 源码模式(python btrigger_daemon.py): 需要脚本位置参数
+            prog = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        # 自启行只含运行时参数, 不得含 --install-startup(否则递归自启)
         with open(bat, "w", encoding="gbk", errors="replace") as f:
-            f.write(f'@echo off\r\nstart "" /min "{py}" '
-                    f'"{os.path.abspath(__file__)}" --token "{args.token}" '
+            f.write(f'@echo off\r\nstart "" /min {prog} '
+                    f'--token "{args.token}" '
                     f'--allow "{args.allow}" --app-substr "{args.app_substr}" '
                     f'--voice-key "{args.voice_key}" --port {args.port}\r\n')
         print(f"已写登录自启: {bat}")

@@ -1447,9 +1447,15 @@ class Forwarder:
                 return
             self.last_enter_at = now
             if self.trigger_mode == "mic":
-                if self.cross is not None:
-                    self.cross.send({"event": "enter"})
-                    print("[cross] 回车直通 (B 机注入)")
+                # 方案a(2026-10-28): 回车与语音键同走焦点路由 —— 焦点在客户机
+                # → 直通该机助手; 焦点在本机/兜底 → 本机注入。旧 `cross is not
+                # None` 判断在 cross 常驻化后恒真, 曾把本机回车全发去空地址。
+                tgt = self._route_target()
+                if tgt:
+                    self.cross.target = tgt
+                    ok = self.cross.send({"event": "enter"})
+                    print(f"[route] 焦点 {getattr(self, 'focus_screen', '?')} → "
+                          f"回车直通 {tgt} ({'已发' if ok else '发送失败'})")
                     return
                 # 治本(2026-10-15): DOWN 发送也必须确定性对准 Agent —— 前台
                 # 被抢(用户在开发别的东西)时, 先找回用户最近在用的 Agent 再

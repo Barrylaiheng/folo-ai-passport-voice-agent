@@ -40,4 +40,28 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
         print(f"已写入 _internal 运行时({n} 个文件)")
     else:
         print("⚠️ 未找到 _internal 目录, 请先构建 onedir 产物再打 zip")
+    # 6) B 机触发助手(多机联动 P0): 独立冻结 exe, 放 btrigger/ 子目录。
+    #    B 机零 Python 依赖: 解压后双击 setup-bmachine.cmd 即自启 + 放行防火墙。
+    #    推导路径: 主 exe 在 windows/build/dist/AI-Passport-Voice-v0.4.0/,
+    #    btrigger 产物在 windows/build/dist/AI-Passport-btrigger-v0.4.0/。
+    btrigger_exe = exe.parent.parent / "AI-Passport-btrigger-v0.4.0" / "AI-Passport-btrigger-v0.4.0.exe"
+    if btrigger_exe.is_file():
+        dst.write(btrigger_exe, top + "btrigger/" + btrigger_exe.name)
+        print(f"已写入 B 机触发助手 {btrigger_exe.name}")
+        # onedir 运行时 _internal(python 解释器 + 依赖), 缺它 exe 起不来
+        btrigger_internal = btrigger_exe.parent / "_internal"
+        if btrigger_internal.is_dir():
+            for p in btrigger_internal.rglob("*"):
+                # 排除 daemon 运行时写的 btrigger.log(可能残留测试日志)
+                if p.is_file() and p.name != "btrigger.log":
+                    arc = top + "btrigger/" + p.relative_to(btrigger_exe.parent).as_posix()
+                    dst.write(p, arc)
+            print("已写入 btrigger/_internal 运行时")
+        # 一键部署脚本(管理员放行防火墙 + 注册自启 + 显示本机 IP)
+        setup = repo / "windows" / "setup-bmachine.cmd"
+        if setup.is_file():
+            dst.write(setup, top + "btrigger/setup-bmachine.cmd")
+            print("已写入 btrigger/setup-bmachine.cmd")
+    else:
+        print("WARNING: 未找到 btrigger_daemon.exe, 请先构建 B 机助手再打 zip")
 print("OK:", out)

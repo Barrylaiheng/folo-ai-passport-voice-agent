@@ -917,6 +917,12 @@ class Forwarder:
         self.cdp = CdpClient(self.cdp_port or 9222)
         self._cdp_active = False  # CDP 是否正在录音(松手停录要走 CDP 完成)
         self.loop = None
+        # 跨机自动发现(A 机侧, P1): 监听 B 机 beacon, 维护 discovered 列表
+        self.discovered = {}
+        self._beacon_stop = None
+        _dp = int(getattr(args, "b_discover_port", 0) or 0)
+        if _dp > 0:
+            _start_beacon_listener(self, _dp)
         # 焦点观察器(2026-10-15 治本): 持续记录"用户最近一次所在前台的 Agent
         # 窗口"。按键瞬间"前台是谁"不可信(用户在开发任何东西时焦点随时会被
         # 终端/浏览器/被开发程序抢走), 找回目标必须以此为锚, 而非碰运气的前台。
@@ -1879,6 +1885,8 @@ def main():
                     help="跨网隧道公网地址 host:port(如 SunnyNgrok/frp 给的地址);"
                          " 非空时 device.hello 后自动推送 cfg.udp 存进设备 NVS")
     ap.add_argument("--no-audio", action="store_true", help="只做热键转发")
+    ap.add_argument("--b-discover-port", type=int, default=33335,
+                    help="监听 B 机助手 beacon 端口(默认 33335, 用于自动发现/配对; 0=关闭)")
     ap.add_argument("--target-title", default=default_target_title,
                     help="[text模式] 自动聚焦的窗口标题子串(留空=不聚焦)")
     ap.add_argument("--auto-enter", action="store_true", default=default_auto_enter,
@@ -2011,6 +2019,7 @@ def main():
     else:
         args.focus_click = None
     args.apps = default_apps
+    global fwd  # P1: 托盘回调(_on_cfg/_on_scan/_pair_with/_tray_menu)为模块级函数, 需经全局 fwd 访问运行态
     fwd = Forwarder(args)
     print("=" * 66)
     print("           AI Passport · 随身 AI 语音服务已启动")
@@ -2069,8 +2078,133 @@ def main():
             pass
         return lines or ["运行中"]
 
+
+# ---------- 跨机自动发现 / 配对(P1) ----------
+BEACON_EVT_TYPE = 0x22   # 与 btrigger_daemon 广播 beacon 同型
+
+
+def _start_beacon_listener(fwd, port):
+    """A 机监听 B 机助手 beacon(0x22), 维护 discovered 列表(带 TTL 30s)。"""
+    import socket as _s
+    fwd._beacon_stop = threading.Event()
+    def _loop():
+        bs = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+        try:
+            bs.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+        except Exception:
+            pass
+        try:
+            bs.bind(("0.0.0.0", port))
+        except OSError as e:
+            print(f"[beacon] 监听 {port} 失败: {e}", file=sys.stderr)
+            return
+        bs.settimeout(1.0)
+        print(f"[beacon] 监听 B 机发现信号 0.0.0.0:{port}")
+        while not fwd._beacon_stop.is_set():
+            try:
+                data, addr = bs.recvfrom(1024)
+            except _s.timeout:
+                continue
+            except Exception:
+                break
+            if not data or data[0] != BEACON_EVT_TYPE:
+                continue
+            try:
+                info = json.loads(data[1:].decode("utf-8"))
+            except Exception:
+                continue
+            if info.get("role") != "btrigger":
+                continue
+            ip = str(info.get("ip") or addr[0])
+            fwd.discovered[ip] = {"host": str(info.get("host", ip)),
+                                  "last": time.monotonic()}
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+def _on_cfg():
+    """托盘"配置跨机(B机)": 打开 voice-config.json 让用户手填 target。"""
+    cfg_path = os.path.join(APP_DIR, "voice-config.json")
+    if os.path.isfile(cfg_path):
+        try:
+            os.startfile(cfg_path)
+        except Exception:
+            pass
+
+
+def _on_scan():
+    """托盘"重新扫描": 清空 discovered, 重新监听 beacon。"""
+    if getattr(fwd, "discovered", None) is not None:
+        fwd.discovered.clear()
+    print("[scan] 已清空可配对列表, 重新监听 beacon")
+
+
+def _pair_with(idx):
+    """托盘配对列表点选: 写 voice-config.json + 热改 fwd.cross.target。"""
+    disc = getattr(fwd, "discovered", None) or {}
+    items = [ip for ip, v in disc.items()
+             if time.monotonic() - v.get("last", 0) < 30]
+    if idx < 0 or idx >= len(items):
+        print("[pair] 无效配对项", file=sys.stderr)
+        return
+    ip = items[idx]
+    cfg_path = os.path.join(APP_DIR, "voice-config.json")
     try:
-        from tray_icon import start_tray
+        data = {}
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, encoding="utf-8-sig") as f:
+                data = json.load(f)
+        xt = data.setdefault("cross_trigger", {})
+        xt["target"] = ip
+        # token 留空: 沿用 B 机"学习首个来源"安全模型, 不覆盖已有 token
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[pair] 写配置失败: {e}", file=sys.stderr)
+    if fwd.cross is None:
+        fwd.cross = CrossTriggerSender(ip, CROSS_TRIGGER_PORT, "")
+    else:
+        fwd.cross.target = ip
+    print(f"[pair] 已配对 B 机 {ip} (热更新 cross.target, 配置已持久化)")
+
+
+def _tray_menu():
+    """结构化托盘菜单(状态三段 + 动作 + 配对列表)。"""
+    status = []
+    try:
+        age = time.time() - getattr(fwd, "_last_hello_at", -1e9)
+        if age < 0:
+            status.append("设备: 等待连接…")
+        elif age < 10:
+            status.append("设备: 在线 ✓")
+        else:
+            status.append("设备: 未连接 ✗")
+    except Exception:
+        pass
+    try:
+        if fwd.cross is not None:
+            status.append(f"模式: 跨机 → B({fwd.cross.target})")
+        else:
+            status.append("模式: 本机注入")
+    except Exception:
+        pass
+    try:
+        status.append("音频: VB-Cable " + ("就绪" if (fwd.sink and fwd.sink.enabled)
+                                            else "未就绪"))
+    except Exception:
+        pass
+    actions = [(IDM_CFG, "配置跨机(B机)…"), (IDM_SCAN, "重新扫描")]
+    pairs = []
+    try:
+        now = time.monotonic()
+        for ip, info in fwd.discovered.items():
+            if now - info.get("last", 0) < 30:
+                pairs.append((ip, info.get("host", ip)))
+    except Exception:
+        pass
+    return {"status": status, "actions": actions, "pairs": pairs}
+
+    try:
+        from tray_icon import start_tray, IDM_CFG, IDM_SCAN
 
         def _on_tray_quit():
             try:
@@ -2088,10 +2222,11 @@ def main():
             if _cand and os.path.isfile(_cand):
                 _ico = _cand
         if start_tray(_ico, log_path=_log_path, on_quit=_on_tray_quit,
-                      status_fn=_tray_status,
+                      menu_fn=_tray_menu,
+                      callbacks={"cfg": _on_cfg, "scan": _on_scan, "pair": _pair_with},
                       balloon=("AI 护照语音已启动",
                                "长按设备 UP 键说话, 文字自动进当前窗口。"
-                               "右键托盘图标可看状态/打开日志/退出。")):
+                               "右键托盘图标可看状态/配对/打开日志/退出。")):
             print("[tray] 托盘图标已启动: 右下角可看运行状态/打开日志/退出")
         else:
             print("[tray] 托盘不可用(缺 passport-voice.ico 或非 Windows), 仅后台运行")

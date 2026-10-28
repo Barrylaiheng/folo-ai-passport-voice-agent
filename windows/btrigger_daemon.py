@@ -33,11 +33,27 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 
 CROSS_EVT_TYPE = 0x21
 DEFAULT_PORT = 33334
 RECV_BUF = 1024
+BEACON_TYPE = 0x22            # B 机助手广播 beacon: A 机据此自动发现, 与设备 0x01-0x04 / 触发 0x21 区分
+DEFAULT_BEACON_PORT = 33335
+
+
+def get_local_ip():
+    """本机局域网 IPv4(beacon 宣告用, 让 A 机学到 B 的 IP, 免手填)。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
 
 # ---------------------------------------------------------------- 日志 ------
 
@@ -196,6 +212,8 @@ def main():
                     help="只解析事件并打印, 不真正注入(链路自测用)")
     ap.add_argument("--install-startup", action="store_true",
                     help="在启动文件夹写登录自启 .bat 后退出")
+    ap.add_argument("--beacon-port", type=int, default=DEFAULT_BEACON_PORT,
+                    help="广播 beacon 端口(默认 33335, 供 A 机自动发现; 0=关闭)")
     args = ap.parse_args()
 
     if args.install_startup:
@@ -224,9 +242,33 @@ def main():
         vlog(f"绑定 UDP {args.port} 失败: {e} (助手是否已在运行?)")
         sys.exit(1)
     vlog(f"btrigger_daemon 启动: 监听 0.0.0.0:{args.port} "
-         f"app={args.app_substr!r} voice_key={args.voice_key} "
-         f"token={'开' if tail else '关'} allow={allow or '(学习首个来源)'} "
-         f"dry_run={args.dry_run}")
+          f"app={args.app_substr!r} voice_key={args.voice_key} "
+          f"token={'开' if tail else '关'} allow={allow or '(学习首个来源)'} "
+          f"dry_run={args.dry_run}")
+
+    # ---- B 机助手 beacon 广播(供 A 机自动发现/配对, 免手填 IP) ----
+    _beacon_stop = threading.Event()
+    if args.beacon_port and args.beacon_port > 0:
+        _bp = args.beacon_port
+        _pkt = (bytes((BEACON_TYPE,))
+                + json.dumps({"role": "btrigger",
+                              "host": socket.gethostname(),
+                              "ip": get_local_ip(),
+                              "port": args.port}).encode("utf-8"))
+        def _beacon_loop():
+            bs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                bs.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            except Exception:
+                pass
+            vlog(f"[beacon] 广播 B 机助手发现信号 → 255.255.255.255:{_bp}")
+            while not _beacon_stop.is_set():
+                try:
+                    bs.sendto(_pkt, ("255.255.255.255", _bp))
+                except Exception as e:
+                    vlog(f"[beacon] 广播失败: {e}")
+                _beacon_stop.wait(2.0)
+        threading.Thread(target=_beacon_loop, daemon=True).start()
 
     sock.settimeout(5.0)
     while True:

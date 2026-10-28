@@ -60,6 +60,9 @@ IDI_APPLICATION = 32512
 IDM_STATUS = 100
 IDM_LOG = 101
 IDM_QUIT = 102
+IDM_CFG = 103     # 配置跨机(B 机): 填 target IP
+IDM_SCAN = 104    # 重新扫描可配对电脑
+IDM_PAIR_BASE = 200   # 配对列表项 = IDM_PAIR_BASE + index
 
 # 状态刷新间隔(毫秒) —— tooltip 每 3 秒跟随状态变化
 STATUS_REFRESH_MS = 3000
@@ -147,13 +150,15 @@ class _TrayState:
     """托盘线程共享状态(简单命名空间)。"""
 
     def __init__(self, ico_path, log_path, on_quit, tooltip,
-                 status_fn=None, balloon=None):
+                 status_fn=None, menu_fn=None, balloon=None, callbacks=None):
         self.ico_path = ico_path
         self.log_path = log_path
         self.on_quit = on_quit
         self.tooltip = (tooltip or "AI Passport 语音")[:127]
-        self.status_fn = status_fn      # -> list[str], 菜单逐行显示的实时状态
+        self.status_fn = status_fn      # -> list[str], 菜单逐行显示的实时状态(旧)
+        self.menu_fn = menu_fn          # -> dict{status,actions,pairs}, 结构化菜单(新)
         self.balloon = balloon          # (title, text) 启动气泡, 只弹一次
+        self.callbacks = callbacks or {}  # {cmd_id: func} 动作回调(cfg/scan/pair)
         self.balloon_shown = False
         self.hwnd = None
         self.nid = None
@@ -222,7 +227,7 @@ def _show_balloon(state):
 
 
 def _show_menu(state):
-    """弹出托盘菜单, 返回选中的命令 ID(0=未选)。"""
+    """弹出托盘菜单, 返回选中的命令 ID(0=未选)。新: 支持 menu_fn 结构化(状态+动作+配对列表)。"""
     user32 = ctypes.windll.user32
     menu = user32.CreatePopupMenu()
     if not menu:
@@ -231,11 +236,31 @@ def _show_menu(state):
         # 标题行(灰字)
         user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS,
                            "AI Passport · 随身 AI 语音")
-        # 实时状态行(灰字, 每行一条)
-        for line in _status_lines(state):
+        # 状态/动作/配对列表: 优先 menu_fn(结构化), 回退旧 status_fn(纯状态行)
+        status_lines, actions, pairs = [], [], []
+        if state.menu_fn:
+            try:
+                md = state.menu_fn() or {}
+                status_lines = md.get("status", []) or []
+                actions = md.get("actions", []) or []
+                pairs = md.get("pairs", []) or []
+            except Exception:
+                status_lines = _status_lines(state)
+        else:
+            status_lines = _status_lines(state)
+        for line in status_lines:
             user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS,
-                               "　" + line)
+                               "　" + str(line))
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        # 可点击动作项(配置跨机 / 重新扫描)
+        for aid, label in actions:
+            user32.AppendMenuW(menu, MF_STRING, aid, str(label))
+        # 可点击配对列表(B 机发现)
+        for i, (ip, host) in enumerate(pairs):
+            user32.AppendMenuW(menu, MF_STRING, IDM_PAIR_BASE + i,
+                               "　配对 → %s (%s)" % (host, ip))
+        if actions or pairs:
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         if state.log_path and os.path.isfile(state.log_path):
             user32.AppendMenuW(menu, MF_STRING, IDM_LOG, "打开日志")
         user32.AppendMenuW(menu, MF_STRING, IDM_QUIT, "退出")
@@ -257,6 +282,21 @@ def _handle_menu(state, cmd):
         try:
             os.startfile(state.log_path)
         except OSError:
+            pass
+    elif cmd == IDM_CFG and state.callbacks.get("cfg"):
+        try:
+            state.callbacks["cfg"]()
+        except Exception:
+            pass
+    elif cmd == IDM_SCAN and state.callbacks.get("scan"):
+        try:
+            state.callbacks["scan"]()
+        except Exception:
+            pass
+    elif IDM_PAIR_BASE <= cmd < IDM_PAIR_BASE + 100 and state.callbacks.get("pair"):
+        try:
+            state.callbacks["pair"](cmd - IDM_PAIR_BASE)
+        except Exception:
             pass
     elif cmd == IDM_QUIT:
         shell32 = ctypes.windll.shell32
@@ -344,7 +384,7 @@ def _tray_thread(state):
 
 def start_tray(ico_path, log_path=None, on_quit=None,
                tooltip="AI Passport 语音 · 运行中", status_fn=None,
-               balloon=None):
+               menu_fn=None, balloon=None, callbacks=None):
     """启动托盘线程(非阻塞)。成功返回 True, 失败返回 False(转发器照常跑)。
 
     status_fn: 无参函数, 返回 list[str] 实时状态行(菜单逐行显示,
@@ -354,7 +394,7 @@ def start_tray(ico_path, log_path=None, on_quit=None,
     if os.name != "nt":
         return False
     state = _TrayState(ico_path, log_path, on_quit, tooltip, status_fn,
-                       balloon)
+                       menu_fn, balloon, callbacks)
     try:
         t = threading.Thread(target=_tray_thread, args=(state,),
                              daemon=True, name="passport-tray")
